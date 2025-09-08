@@ -1,0 +1,13 @@
+mexc:
+  ws:
+    enabled: true
+    endpoint: wss://wbs-api.mexc.com/ws
+    pingPeriodSec: 25
+    rotateAfterHours: 23
+    reconnectBackoffBaseSec: 2
+    reconnectBackoffMaxSec: 60
+    maxSubscriptionsPerConn: 30
+logging:
+  level:
+    root: INFO
+    com.suhoi.mexcwebsocket: DEBUG
