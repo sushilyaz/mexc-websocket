@@ -30,6 +30,7 @@ public class MexcWsClient implements WebSocket.Listener {
         default void onDepthInc(String symbol, PublicIncreaseDepthsV3Api inc, long sendTime) {}
         default void onLimitDepth(String symbol, PublicLimitDepthsV3Api depth, long sendTime) {}
         default void onBookTicker(String symbol, PublicAggreBookTickerV3Api bt, long sendTime) {}
+        default void onAggreDepth(String symbol, PublicAggreDepthsV3Api bt, long sendTime) {}
         default void onMiniTicker(String symbol, PublicMiniTickerV3Api mt, long sendTime) {}
         default void onMiniTickers(PublicMiniTickersV3Api mts, long sendTime) {}
         default void onKline(String symbol, PublicSpotKlineV3Api kline, long createTime) {}
@@ -222,6 +223,8 @@ public class MexcWsClient implements WebSocket.Listener {
                 fire(l -> l.onLimitDepth(symbol, w.getPublicLimitDepths(), sendTime));
             } else if (w.hasPublicAggreBookTicker()) {
                 fire(l -> l.onBookTicker(symbol, w.getPublicAggreBookTicker(), sendTime));
+            } else if (w.hasPublicAggreDepths()) {
+                fire(l -> l.onAggreDepth(symbol, w.getPublicAggreDepths(), sendTime));
             } else if (w.hasPublicMiniTicker()) {
                 fire(l -> l.onMiniTicker(symbol, w.getPublicMiniTicker(), sendTime));
             } else if (w.hasPublicMiniTickers()) {

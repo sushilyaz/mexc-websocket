@@ -17,7 +17,7 @@ public final class MexcChannel {
     }
     // Diff Depth (incremental) 10/100ms
     public static String diffDepth(String symbol, int intervalMs) {
-        return "spot@public.aggre.depth.v3.api.pb@" + intervalMs + "ms@" + up(symbol);
+        return "spot@public.increase.depths.v3.api.pb@" + intervalMs + "ms@" + up(symbol);
     }
     // Kline: Min1/5/15/30/60, Hour4/8, Day1, Week1, Month1
     public static String kline(String symbol, String interval) {
@@ -26,5 +26,9 @@ public final class MexcChannel {
     // FULL snapshot L2 (limit=5/10/20/50/100/...) — начальная и периодическая «база»
     public static String limitDepth(String symbol, int limit) {
         return "spot@public.limit.depths.v3.api.pb@" + limit + "@" + up(symbol);
+    }
+    // агрегированный depth 10/100ms
+    public static String aggreDepth(String symbol, int intervalMs) {
+        return "spot@public.aggre.depth.v3.api.pb@" + intervalMs + "ms@" + up(symbol);
     }
 }
