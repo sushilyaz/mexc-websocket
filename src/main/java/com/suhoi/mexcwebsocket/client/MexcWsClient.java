@@ -1,18 +1,11 @@
 package com.suhoi.mexcwebsocket.client;
 
 import com.google.protobuf.InvalidProtocolBufferException;
+import com.mxc.push.common.protobuf.*;
 import com.suhoi.mexcwebsocket.config.MexcWsProps;
 import lombok.extern.slf4j.Slf4j;
 
 // ==== ТВОИ сгенерированные protobuf-классы ====
-import com.mxc.push.common.protobuf.PushDataV3ApiWrapper;
-import com.mxc.push.common.protobuf.PublicAggreDealsV3Api;
-import com.mxc.push.common.protobuf.PublicIncreaseDepthsV3Api;
-import com.mxc.push.common.protobuf.PublicLimitDepthsV3Api;
-import com.mxc.push.common.protobuf.PublicAggreBookTickerV3Api;
-import com.mxc.push.common.protobuf.PublicMiniTickerV3Api;
-import com.mxc.push.common.protobuf.PublicMiniTickersV3Api;
-import com.mxc.push.common.protobuf.PublicSpotKlineV3Api;
 // ==============================================
 
 import java.net.URI;
@@ -43,6 +36,10 @@ public class MexcWsClient implements WebSocket.Listener {
         default void onKline(String symbol, PublicSpotKlineV3Api kline, long createTime) {}
         default void onError(Throwable t) {}
         default void onClosed(int status, String reason) {}
+        // --- новые для user data streams ---
+        default void onPrivateAccount(PrivateAccountV3Api acc, long sendTime) {}
+        default void onPrivateDeals(String symbol, PrivateDealsV3Api deals, long sendTime) {}
+        default void onPrivateOrders(String symbol, PrivateOrdersV3Api orders, long sendTime) {}
     }
 
     private final MexcWsProps props;
@@ -209,9 +206,16 @@ public class MexcWsClient implements WebSocket.Listener {
 //            log.debug("WRAPPER toString: {}", w); // покажет, какие поля реально выставлены
             String symbol = w.getSymbol();
             long sendTime = w.getSendTime();
-
-            // NB: имена has/get зависят от названий полей в твоих .proto
-            if (w.hasPublicAggreDeals()) {
+            // --- PRIVATE (user data) ---
+            if (w.hasPrivateAccount()) {
+                fire(l -> l.onPrivateAccount(w.getPrivateAccount(), sendTime));
+            } else if (w.hasPrivateDeals()) {
+                fire(l -> l.onPrivateDeals(symbol, w.getPrivateDeals(), sendTime));
+            } else if (w.hasPrivateOrders()) {
+                fire(l -> l.onPrivateOrders(symbol, w.getPrivateOrders(), sendTime));
+            }
+            // MARKET (market)
+            else if (w.hasPublicAggreDeals()) {
                 fire(l -> l.onDeals(symbol, w.getPublicAggreDeals(), sendTime));
             } else if (w.hasPublicIncreaseDepths()) {
                 fire(l -> l.onDepthInc(symbol, w.getPublicIncreaseDepths(), sendTime));
