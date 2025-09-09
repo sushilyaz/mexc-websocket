@@ -1,9 +1,8 @@
-package com.suhoi.mexcwebsocket.service;
+package com.suhoi.mexcwebsocket.mexc.ws.user;
 
-import com.suhoi.mexcwebsocket.client.MexcWsClient;
+import com.suhoi.mexcwebsocket.mexc.ws.core.MexcWsClient;
 import com.suhoi.mexcwebsocket.config.MexcWsProps;
-import com.suhoi.mexcwebsocket.model.Creds;
-import com.suhoi.mexcwebsocket.util.ListenKeyClient;
+import com.suhoi.mexcwebsocket.domain.model.Creds;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Objects;

@@ -1,6 +1,5 @@
-package com.suhoi.mexcwebsocket.client;
+package com.suhoi.mexcwebsocket.adapter.telegram;
 
-import com.suhoi.mexcwebsocket.telegram.TelegramBotHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;

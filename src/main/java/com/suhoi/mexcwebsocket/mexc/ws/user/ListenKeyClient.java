@@ -1,4 +1,4 @@
-package com.suhoi.mexcwebsocket.util;
+package com.suhoi.mexcwebsocket.mexc.ws.user;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

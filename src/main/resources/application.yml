@@ -8,14 +8,16 @@ mexc:
     reconnectBackoffMaxSec: 60
     maxSubscriptionsPerConn: 30
   user:
-    enabled: true
-    apiKey: mx0vglKvKt55AVJwDs
-    secret: 2129a7877d774aeb90701ca3f6b02160
-    keepAliveMinutes: 30
+    enabled: false   # ⬅️ выключили глобальный user-WS
+#    apiKey:        # ⬅️ эти поля убери
+#    secret:
+#    keepAliveMinutes: 30
+
 logging:
   level:
     root: INFO
     com.suhoi.mexcwebsocket: DEBUG
+
 app:
   telegram:
     botToken: 8013267846:AAFRYVCj2Et9cRZZmKdxjq7JhnzG8O82mck

@@ -1,10 +1,9 @@
 package com.suhoi.mexcwebsocket.db;
 
-import com.suhoi.mexcwebsocket.model.Creds;
+import com.suhoi.mexcwebsocket.domain.model.Creds;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MemoryDb {
     private static final Map<Long, Creds> accountA = new ConcurrentHashMap<>();

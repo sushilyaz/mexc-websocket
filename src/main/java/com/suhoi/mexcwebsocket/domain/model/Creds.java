@@ -1,4 +1,4 @@
-package com.suhoi.mexcwebsocket.model;
+package com.suhoi.mexcwebsocket.domain.model;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;

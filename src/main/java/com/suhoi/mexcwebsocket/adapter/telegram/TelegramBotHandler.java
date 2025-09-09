@@ -1,9 +1,9 @@
-package com.suhoi.mexcwebsocket.telegram;
+package com.suhoi.mexcwebsocket.adapter.telegram;
 
 import com.suhoi.mexcwebsocket.config.AppProperties;
 import com.suhoi.mexcwebsocket.db.MemoryDb;
-import com.suhoi.mexcwebsocket.model.Creds;
-import com.suhoi.mexcwebsocket.service.DrainService;
+import com.suhoi.mexcwebsocket.domain.model.Creds;
+import com.suhoi.mexcwebsocket.application.DrainService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -57,7 +57,9 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
 //
 //                        ⚠️ Ключи хранятся только в памяти процесса и пропадут при перезапуске.
 //                        """);
-                drainService.startDrain("", new BigDecimal(3), chatId);
+                String[] p = text.split("\\s+");
+                final String symbol = p[1].toUpperCase();
+                drainService.startDrain(symbol, new BigDecimal(3), chatId);
                 return;
             }
 

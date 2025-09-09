@@ -1,7 +1,6 @@
-package com.suhoi.mexcwebsocket.service;
+package com.suhoi.mexcwebsocket.mexc.ws.market;
 
-import com.suhoi.mexcwebsocket.client.MexcWsClient;
-import com.suhoi.mexcwebsocket.util.MexcChannel;
+import com.suhoi.mexcwebsocket.mexc.ws.core.MexcWsClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;

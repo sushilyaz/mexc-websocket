@@ -1,12 +1,11 @@
-package com.suhoi.mexcwebsocket.service;
+package com.suhoi.mexcwebsocket.mexc.ws.user;
 
-import com.suhoi.mexcwebsocket.client.MexcWsClient;
+import com.suhoi.mexcwebsocket.mexc.ws.core.MexcWsClient;
 import com.suhoi.mexcwebsocket.config.MexcWsProps;
-import com.suhoi.mexcwebsocket.model.Creds;
+import com.suhoi.mexcwebsocket.domain.model.Creds;
 import com.mxc.push.common.protobuf.PrivateAccountV3Api;
 import com.mxc.push.common.protobuf.PrivateDealsV3Api;
 import com.mxc.push.common.protobuf.PrivateOrdersV3Api;
-import com.suhoi.mexcwebsocket.util.ListenKeyClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;

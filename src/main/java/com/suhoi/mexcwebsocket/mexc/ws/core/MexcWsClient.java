@@ -1,4 +1,4 @@
-package com.suhoi.mexcwebsocket.client;
+package com.suhoi.mexcwebsocket.mexc.ws.core;
 
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.mxc.push.common.protobuf.*;

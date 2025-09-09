@@ -1,4 +1,4 @@
-package com.suhoi.mexcwebsocket.telegram;
+package com.suhoi.mexcwebsocket.adapter.telegram;
 
 import com.suhoi.mexcwebsocket.config.AppProperties;
 import lombok.RequiredArgsConstructor;
