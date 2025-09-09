@@ -3,6 +3,7 @@ package com.suhoi.mexcwebsocket.telegram;
 import com.suhoi.mexcwebsocket.config.AppProperties;
 import com.suhoi.mexcwebsocket.db.MemoryDb;
 import com.suhoi.mexcwebsocket.model.Creds;
+import com.suhoi.mexcwebsocket.service.DrainService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -18,6 +19,7 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
 
     private final AppProperties appProperties;
     private final TelegramService tg;
+    private final DrainService drainService;
 
     @Override
     public String getBotUsername() {
@@ -38,23 +40,24 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
 
         try {
             if (text.startsWith("/start")) {
-                tg.reply(chatId, """
-                        Привет! Я бот для перелива через спред на MEXC.
-
-                        Команды:
-                        /setA <apiKey> <secretKey> — задать ключи Аккаунта A (С КОТОРОГО переливаем)
-                        /setB <apiKey> <secretKey> — задать ключи Аккаунта B (НА КОТОРЫЙ переливаем)
-
-                        Режимы перелива:
-                        1) Простой:   /drain <SYMBOL> <USDT>
-                           пример: /drain ANTUSDT 5
-
-                        2) В диапазоне: /drain <SYMBOL> <LOW> <HIGH> <USDT>
-                           пример: /drain ANTUSDT 0,000010 0,000020 5
-                           Цены можно писать с запятой или точкой.
-
-                        ⚠️ Ключи хранятся только в памяти процесса и пропадут при перезапуске.
-                        """);
+//                tg.reply(chatId, """
+//                        Привет! Я бот для перелива через спред на MEXC.
+//
+//                        Команды:
+//                        /setA <apiKey> <secretKey> — задать ключи Аккаунта A (С КОТОРОГО переливаем)
+//                        /setB <apiKey> <secretKey> — задать ключи Аккаунта B (НА КОТОРЫЙ переливаем)
+//
+//                        Режимы перелива:
+//                        1) Простой:   /drain <SYMBOL> <USDT>
+//                           пример: /drain ANTUSDT 5
+//
+//                        2) В диапазоне: /drain <SYMBOL> <LOW> <HIGH> <USDT>
+//                           пример: /drain ANTUSDT 0,000010 0,000020 5
+//                           Цены можно писать с запятой или точкой.
+//
+//                        ⚠️ Ключи хранятся только в памяти процесса и пропадут при перезапуске.
+//                        """);
+                drainService.startDrain("", new BigDecimal(3), chatId);
                 return;
             }
 

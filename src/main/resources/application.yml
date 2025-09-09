@@ -16,3 +16,7 @@ logging:
   level:
     root: INFO
     com.suhoi.mexcwebsocket: DEBUG
+app:
+  telegram:
+    botToken: 8013267846:AAFRYVCj2Et9cRZZmKdxjq7JhnzG8O82mck
+    botUsername: drain_mexc_bot

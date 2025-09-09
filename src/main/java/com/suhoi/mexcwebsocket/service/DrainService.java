@@ -14,11 +14,26 @@ import static com.suhoi.mexcwebsocket.util.FormatHelpers.fmt;
 @Slf4j
 @RequiredArgsConstructor
 public class DrainService {
+    private final UserStreamRegistry userStreams;
 
     public void startDrain(String symbol, BigDecimal usdtAmount, Long chatId) {
         Creds credsA = MemoryDb.getAccountA(chatId);
         Creds credsB = MemoryDb.getAccountB(chatId);
 
-        log.info("🚀 START_DRAIN: symbol={}, amount={} USDT", symbol, fmt(usdtAmount));
+        log.info("🚀 START_DRAIN chatId={} symbol='{}' amount={} USDT", chatId, symbol, fmt(usdtAmount));
+
+        if (credsA != null) {
+            userStreams.startOrUpdate(chatId, UserStreamRegistry.Slot.A, credsA);
+        } else {
+            log.warn("⚠️ No creds for AccountA (chatId={})", chatId);
+        }
+
+        if (credsB != null) {
+            userStreams.startOrUpdate(chatId, UserStreamRegistry.Slot.B, credsB);
+        } else {
+            log.warn("⚠️ No creds for AccountB (chatId={})", chatId);
+        }
+
+        // Здесь — остальная логика дренажа, если нужна
     }
 }
