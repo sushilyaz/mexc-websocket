@@ -201,22 +201,23 @@ public class MexcWsClient implements WebSocket.Listener {
     @Override
     public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer message, boolean last) {
         byte[] bytes = new byte[message.remaining()];
+//        log.debug("BIN frame size={} bytes", bytes.length);
         message.get(bytes);
 
         try {
             PushDataV3ApiWrapper w = PushDataV3ApiWrapper.parseFrom(bytes);
-
+//            log.debug("WRAPPER toString: {}", w); // покажет, какие поля реально выставлены
             String symbol = w.getSymbol();
             long sendTime = w.getSendTime();
 
             // NB: имена has/get зависят от названий полей в твоих .proto
-            if (w.hasPublicDeals()) {
+            if (w.hasPublicAggreDeals()) {
                 fire(l -> l.onDeals(symbol, w.getPublicAggreDeals(), sendTime));
             } else if (w.hasPublicIncreaseDepths()) {
                 fire(l -> l.onDepthInc(symbol, w.getPublicIncreaseDepths(), sendTime));
             } else if (w.hasPublicLimitDepths()) {
                 fire(l -> l.onLimitDepth(symbol, w.getPublicLimitDepths(), sendTime));
-            } else if (w.hasPublicBookTicker()) {
+            } else if (w.hasPublicAggreBookTicker()) {
                 fire(l -> l.onBookTicker(symbol, w.getPublicAggreBookTicker(), sendTime));
             } else if (w.hasPublicMiniTicker()) {
                 fire(l -> l.onMiniTicker(symbol, w.getPublicMiniTicker(), sendTime));
