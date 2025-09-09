@@ -47,8 +47,8 @@ public class DemoSubscriberService implements MexcWsClient.Listener {
     public void onBookTicker(String symbol, PublicAggreBookTickerV3Api bt, long ts) {
         // Если в твоём .proto поля названы нижним кейсом (bidprice/askprice),
         // замени на getBidprice()/getAskprice()
-        log.info("📈 {} bid={}({}) ask={}({}) @{}", symbol,
-                bt.getBidPrice(), bt.getBidQuantity(), bt.getAskPrice(), bt.getAskQuantity(), ts);
+//        log.info("📈 {} bid={}({}) ask={}({}) @{}", symbol,
+//                bt.getBidPrice(), bt.getBidQuantity(), bt.getAskPrice(), bt.getAskQuantity(), ts);
     }
 
     @Override
@@ -56,8 +56,8 @@ public class DemoSubscriberService implements MexcWsClient.Listener {
         if (deals.getDealsCount() > 0) {
             var d = deals.getDeals(0); // НЕ getDealsList(0)!
             // Если поле называется tradetype — используй getTradetype()
-            log.debug("💱 {} price={} qty={} type={} time={}",
-                    symbol, d.getPrice(), d.getQuantity(), d.getTradeType(), d.getTime());
+//            log.debug("💱 {} price={} qty={} type={} time={}",
+//                    symbol, d.getPrice(), d.getQuantity(), d.getTradeType(), d.getTime());
         }
     }
 }
