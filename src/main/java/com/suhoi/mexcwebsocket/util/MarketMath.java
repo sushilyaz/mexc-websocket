@@ -16,11 +16,29 @@ public final class MarketMath {
         return multiples.multiply(step);
     }
 
-    /** Нормализация цены: floor к tick и защита от нуля. */
+    /** ceil к шагу step: ближайшее кратное step, ≥ value. Удобно для SELL у нижней кромки. */
+    public static BigDecimal ceilToStep(BigDecimal value, BigDecimal step) {
+        if (value == null || step == null || step.signum() <= 0) return value;
+        if (value.signum() <= 0) return BigDecimal.ZERO;
+        BigDecimal multiples = value.divide(step, 0, RoundingMode.UP);
+        return multiples.multiply(step);
+    }
+
+    /** Нормализация цены: floor к tick и защита от нуля. (оставь как есть) */
     public static BigDecimal normalizePrice(BigDecimal rawPrice, BigDecimal tick) {
         BigDecimal p = floorToStep(rawPrice, tick);
         if (p == null || p.signum() <= 0) {
             p = (tick != null && tick.signum() > 0) ? tick : new BigDecimal("0.00000001");
+        }
+        return p.stripTrailingZeros();
+    }
+
+    /** Привести цену к «ceil» сетки тика: ближайший допустимый тик НЕ НИЖЕ raw. */
+    public static BigDecimal alignPriceCeil(BigDecimal rawPrice, BigDecimal tickSize) {
+        BigDecimal p = MarketMath.ceilToStep(rawPrice, tickSize);  // вверх к сетке
+        // Защита от нуля/мусора: если raw<=0, вернём 1 тик
+        if (p == null || p.signum() <= 0) {
+            p = (tickSize != null && tickSize.signum() > 0) ? tickSize : new BigDecimal("0.00000001");
         }
         return p.stripTrailingZeros();
     }

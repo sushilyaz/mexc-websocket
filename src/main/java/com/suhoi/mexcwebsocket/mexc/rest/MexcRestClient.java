@@ -55,13 +55,13 @@ public class MexcRestClient {
         return rest.getForObject(uri, SymbolInfoResponseDto.class);
     }
 
-    public String newOrderBuyLimitIoc(String symbol, String qty, String price, String clientId,
-                                      String apiKey, String secretKey) {
+    public String newOrder(String symbol, String side, String type, String timeInForce, String qty, String price, String clientId,
+                           String apiKey, String secretKey) {
         Map<String, String> p = new LinkedHashMap<>();
         p.put("symbol", symbol);
-        p.put("side", "BUY");
-        p.put("type", "LIMIT");
-        p.put("timeInForce", "IOC");
+        p.put("side", side);
+        p.put("type", type);
+        p.put("timeInForce", timeInForce);
         p.put("quantity", qty);
         p.put("price", price);
         p.put("newClientOrderId", clientId);
@@ -70,23 +70,7 @@ public class MexcRestClient {
         try {
             resp = signedRequest("POST", ORDER_ENDPOINT, p, apiKey, secretKey);
         } catch (RuntimeException ex1) {
-            String msg = (ex1.getMessage() == null) ? "" : ex1.getMessage().toLowerCase();
-            // фоллбэк на documented тип
-            if (msg.contains("timeinforce") || msg.contains("illegal") || msg.contains("parameter")) {
-                log.warn("[NEW_ORDER] {}: timeInForce=IOC rejected → try type=IMMEDIATE_OR_CANCEL", symbol);
-                p.remove("timeInForce");
-                p.put("type", "IMMEDIATE_OR_CANCEL");
-                try {
-                    resp = signedRequest("POST", ORDER_ENDPOINT, p, apiKey, secretKey);
-                } catch (RuntimeException ex2) {
-                    log.warn("[NEW_ORDER] {}: IMMEDIATE_OR_CANCEL rejected → try LIMIT GTC", symbol);
-                    p.put("type", "LIMIT");
-                    p.put("timeInForce", "GTC");
-                    resp = signedRequest("POST", ORDER_ENDPOINT, p, apiKey, secretKey);
-                }
-            } else {
-                throw ex1;
-            }
+            throw new RuntimeException(ex1);
         }
 
         String orderId = resp.path("orderId").asText(null);

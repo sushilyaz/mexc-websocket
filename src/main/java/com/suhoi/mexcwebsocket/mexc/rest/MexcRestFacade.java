@@ -2,7 +2,6 @@ package com.suhoi.mexcwebsocket.mexc.rest;
 
 import com.suhoi.mexcwebsocket.db.Cache;
 import com.suhoi.mexcwebsocket.db.MemoryDb;
-import com.suhoi.mexcwebsocket.domain.events.OrderEvent;
 import com.suhoi.mexcwebsocket.domain.model.CachedSymbolInfo;
 import com.suhoi.mexcwebsocket.domain.model.Creds;
 import com.suhoi.mexcwebsocket.domain.model.SymbolFilters;
@@ -17,8 +16,6 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicReference;
 
 @Component
 @RequiredArgsConstructor
@@ -43,7 +40,32 @@ public class MexcRestFacade {
         return MexcMapper.mapToFilters(symbolInformation, symbol);
     }
 
-    public String limitBuyAboveSpreadA(String symbol, BigDecimal usdtAmount, Long chatId) {
+    public String placeLimitSellA(String symbol, BigDecimal price, BigDecimal qty, Long chatId, String clientId) {
+        Creds creds = MemoryDb.getAccountA(chatId);
+        if (creds == null) throw new IllegalArgumentException("Нет ключей для accountA");
+
+        SymbolFilters f = getSymbolFilters(symbol);
+        BigDecimal tick = f.getTickSize();
+
+        BigDecimal p = MarketMath.alignPriceCeil(price, tick);
+        BigDecimal q = MarketMath.normalizeQty(qty, f);
+
+        BigDecimal effMinNotional = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
+        BigDecimal minQtyNeed = MarketMath.minQtyForNotional(p, f.getStepSize(), effMinNotional);
+        if (q.compareTo(minQtyNeed) < 0 || q.compareTo(f.getMinQty()) < 0) {
+            log.warn("SELL {}: qty {} не проходит minNotional/minQty", symbol, q);
+            return null;
+        }
+
+        return mexcRestClient.newOrder(
+                symbol, "SELL", "LIMIT", "GTC",
+                q.toPlainString(), p.toPlainString(), clientId,
+                creds.getApiKey(), creds.getSecret()
+        );
+    }
+
+
+    public String limitBuyAboveSpreadA(String symbol, BigDecimal usdtAmount, Long chatId, String clientId) {
         Creds creds = MemoryDb.getAccountA(chatId);
         if (creds == null) throw new IllegalArgumentException("Нет ключей для accountA (chatId=" + chatId + ")");
 
@@ -59,7 +81,7 @@ public class MexcRestFacade {
         // Бюджет → «сырое» qty → нормализация к stepSize
         if (usdtAmount == null || usdtAmount.signum() <= 0) {
             log.warn("LIMIT BUY[AGGR] {}: бюджет <= 0 ({}) — отмена", symbol, usdtAmount);
-            return "";
+            return null;
         }
 
         BigDecimal rawQty = usdtAmount.divide(price, 18, RoundingMode.DOWN);
@@ -78,53 +100,68 @@ public class MexcRestFacade {
                         usdtAmount.stripTrailingZeros().toPlainString(),
                         minNotional.stripTrailingZeros().toPlainString(),
                         needCost.stripTrailingZeros().toPlainString());
-                return "";
+                return null;
             }
         }
         if (qty == null || qty.signum() <= 0) {
             log.warn("LIMIT BUY[AGGR] {}: qty<=0 после расчётов (budget={}, price={}, stepSize={})",
                     symbol, usdtAmount, price, symbolFilters.getStepSize());
-            return "";
+            return null;
         }
 
-//        BigDecimal notional = price.multiply(qty);
-        String clientId = UUID.randomUUID().toString().replace("-", "");
+        // отправляем ордер
+        return mexcRestClient.newOrder(
+                symbol, "BUY", "LIMIT","IOC", qty.toPlainString(), price.toPlainString(),
+                clientId, creds.getApiKey(), creds.getSecret());
+    }
 
-        var subRef = new AtomicReference<OrderEventBus.Subscription>();
-        OrderEventBus.Subscription sub = orderEventBus.subscribe(ev -> {
-            if (ev instanceof OrderEvent.OrderPartiallyFilled p) {
-                log.info("📥 {} clientId={} PARTIAL filled={} avg={} quote={}",
-                        symbol, p.clientId(),
-                        p.cumulativeQty().stripTrailingZeros(),
-                        p.avgPrice().stripTrailingZeros(),
-                        p.cumulativeQuote().stripTrailingZeros());
-            } else if (ev instanceof OrderEvent.OrderFilled fEv) {
-                log.info("✅ {} clientId={} FILLED filled={} avg={} quote={}",
-                        symbol, fEv.clientId(),
-                        fEv.cumulativeQty().stripTrailingZeros(),
-                        fEv.avgPrice().stripTrailingZeros(),
-                        fEv.cumulativeQuote().stripTrailingZeros());
-                // отписываемся
-                OrderEventBus.Subscription s = subRef.get();
-                if (s != null) s.close();
-            } else if (ev instanceof OrderEvent.OrderCanceled c) {
-                log.warn("🟡 {} clientId={} CANCELED cumQty={} avg={}",
-                        symbol, c.clientId(), c.cumulativeQty().stripTrailingZeros(), c.avgPrice().stripTrailingZeros());
-                OrderEventBus.Subscription s = subRef.get();
-                if (s != null) s.close();
-            } else if (ev instanceof OrderEvent.OrderRejected r) {
-                log.error("🔴 {} clientId={} REJECTED reason={}", symbol, r.clientId(), r.reason());
-                OrderEventBus.Subscription s = subRef.get();
-                if (s != null) s.close();
+    public String limitBuyAboveSpreadB(String symbol, BigDecimal usdtAmount, Long chatId, String clientId) {
+        Creds creds = MemoryDb.getAccountB(chatId);
+        if (creds == null) throw new IllegalArgumentException("Нет ключей для accountB (chatId=" + chatId + ")");
+
+        SymbolFilters symbolFilters = getSymbolFilters(symbol);
+        log.info("SymbolFilters: {}", symbolFilters);
+        // необязательно в нашем случае
+        BigDecimal minNotional = MarketMath.resolveMinNotional(symbol, symbolFilters.getMinNotional());
+
+        log.info("MinNotional: {}", minNotional);
+        // цена над спредом из локального стакана
+        BigDecimal price = priceAboveAsk(symbol);
+
+        // Бюджет → «сырое» qty → нормализация к stepSize
+        if (usdtAmount == null || usdtAmount.signum() <= 0) {
+            log.warn("LIMIT BUY[AGGR] {}: бюджет <= 0 ({}) — отмена", symbol, usdtAmount);
+            return null;
+        }
+
+        BigDecimal rawQty = usdtAmount.divide(price, 18, RoundingMode.DOWN);
+        BigDecimal qty = MarketMath.normalizeQty(rawQty, symbolFilters);
+
+        // minNotional: сколько минимально нужно qty при этой price
+        BigDecimal minQtyNeed = MarketMath.minQtyForNotional(price, symbolFilters.getStepSize(), minNotional);
+        log.info("MinQtyNeed: {}", minQtyNeed);
+        if (qty.compareTo(minQtyNeed) < 0) {
+            BigDecimal needCost = minQtyNeed.multiply(price);
+            if (needCost.compareTo(usdtAmount) <= 0) {
+                qty = minQtyNeed;
+            } else {
+                log.warn("LIMIT BUY[AGGR] {}: бюджет {} USDT < minNotional {} (нужно {} USDT). Ордер НЕ отправлен.",
+                        symbol,
+                        usdtAmount.stripTrailingZeros().toPlainString(),
+                        minNotional.stripTrailingZeros().toPlainString(),
+                        needCost.stripTrailingZeros().toPlainString());
+                return null;
             }
-        }, OrderEventBus.byClientId(clientId));
-
-        // теперь ref знает про подписку
-        subRef.set(sub);
+        }
+        if (qty == null || qty.signum() <= 0) {
+            log.warn("LIMIT BUY[AGGR] {}: qty<=0 после расчётов (budget={}, price={}, stepSize={})",
+                    symbol, usdtAmount, price, symbolFilters.getStepSize());
+            return null;
+        }
 
         // отправляем ордер
-        return mexcRestClient.newOrderBuyLimitIoc(
-                symbol, qty.toPlainString(), price.toPlainString(),
+        return mexcRestClient.newOrder(
+                symbol, "BUY", "LIMIT","IOC", qty.toPlainString(), price.toPlainString(),
                 clientId, creds.getApiKey(), creds.getSecret());
     }
 
