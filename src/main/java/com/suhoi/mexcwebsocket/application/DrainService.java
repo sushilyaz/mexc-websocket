@@ -237,16 +237,16 @@ public class DrainService {
 
                 // отправляем BUY(B) с пересечением pSell
                 try {
-//                    String oidB = mexcRestFacade.limitBuyAboveSpreadB(symbol, s.getPSell(), qtyPlanned, chatId, buyBClientId);
-//                    if (oidB == null) {
-//                        s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "B BUY REST failed/null orderId");
-//                        OrderEventBus.Subscription oldB = subBRef.getAndSet(null);
-//                        if (oldB != null) oldB.close();
-//                    } else {
-//                        s.setState(DrainSession.State.B_MKT_BUY_SENT);
-//                        log.info("➡️ {} BUY[B] placed: cidB={} orderIdB={} qtyPlanned={}",
-//                                symbol, buyBClientId, oidB, fmt(qtyPlanned));
-//                    }
+                    String oidB = mexcRestFacade.limitBuyAboveSpreadB(symbol, s.getPSell(), qtyPlanned, chatId, buyBClientId);
+                    if (oidB == null) {
+                        s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "B BUY REST failed/null orderId");
+                        OrderEventBus.Subscription oldB = subBRef.getAndSet(null);
+                        if (oldB != null) oldB.close();
+                    } else {
+                        s.setState(DrainSession.State.B_MKT_BUY_SENT);
+                        log.info("➡️ {} BUY[B] placed: cidB={} orderIdB={} qtyPlanned={}",
+                                symbol, buyBClientId, oidB, fmt(qtyPlanned));
+                    }
                 } catch (Exception ex) {
                     log.error("BUY[B] send failed: {}", ex.getMessage(), ex);
                     s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "B MARKET-LIKE BUY send failed");
