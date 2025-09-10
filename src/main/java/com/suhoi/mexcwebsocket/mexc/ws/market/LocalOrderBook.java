@@ -1,6 +1,8 @@
 // mexc/ws/market/LocalOrderBook.java
 package com.suhoi.mexcwebsocket.mexc.ws.market;
 
+import com.suhoi.mexcwebsocket.domain.model.L1;
+
 import java.math.BigDecimal;
 import java.util.NavigableMap;
 import java.util.TreeMap;
@@ -88,7 +90,22 @@ public class LocalOrderBook {
         return sb.toString();
     }
 
+    /** Снимок L1 (лучшие bid/ask и timestamp), атомарно под локом стакана. */
+    public synchronized L1 getSnapshotL1() {
+        BigDecimal bid = bids.isEmpty() ? null : bids.firstKey();
+        BigDecimal ask = asks.isEmpty() ? null : asks.firstKey();
+        return new L1(bid, ask, lastUpdateTs);
+    }
 
+    /** Безопасно получить лучшую цену bid. */
+    public synchronized BigDecimal bestBidPx() {
+        return bids.isEmpty() ? null : bids.firstKey();
+    }
+
+    /** Безопасно получить лучшую цену ask. */
+    public synchronized BigDecimal bestAskPx() {
+        return asks.isEmpty() ? null : asks.firstKey();
+    }
     // Можно добавить геттеры/копию для дальнейшей бизнес-логики
     public synchronized NavigableMap<BigDecimal, BigDecimal> copyBids() { return new TreeMap<>(bids); }
     public synchronized NavigableMap<BigDecimal, BigDecimal> copyAsks() { return new TreeMap<>(asks); }

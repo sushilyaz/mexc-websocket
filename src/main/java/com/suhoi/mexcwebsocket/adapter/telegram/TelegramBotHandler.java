@@ -40,26 +40,23 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
 
         try {
             if (text.startsWith("/start")) {
-//                tg.reply(chatId, """
-//                        Привет! Я бот для перелива через спред на MEXC.
-//
-//                        Команды:
-//                        /setA <apiKey> <secretKey> — задать ключи Аккаунта A (С КОТОРОГО переливаем)
-//                        /setB <apiKey> <secretKey> — задать ключи Аккаунта B (НА КОТОРЫЙ переливаем)
-//
-//                        Режимы перелива:
-//                        1) Простой:   /drain <SYMBOL> <USDT>
-//                           пример: /drain ANTUSDT 5
-//
-//                        2) В диапазоне: /drain <SYMBOL> <LOW> <HIGH> <USDT>
-//                           пример: /drain ANTUSDT 0,000010 0,000020 5
-//                           Цены можно писать с запятой или точкой.
-//
-//                        ⚠️ Ключи хранятся только в памяти процесса и пропадут при перезапуске.
-//                        """);
-                String[] p = text.split("\\s+");
-                final String symbol = p[1].toUpperCase();
-                drainService.startDrain(symbol, new BigDecimal(3), chatId);
+                tg.reply(chatId, """
+                        Привет! Я бот для перелива через спред на MEXC.
+
+                        Команды:
+                        /setA <apiKey> <secretKey> — задать ключи Аккаунта A (С КОТОРОГО переливаем)
+                        /setB <apiKey> <secretKey> — задать ключи Аккаунта B (НА КОТОРЫЙ переливаем)
+
+                        Режимы перелива:
+                        1) Простой:   /drain <SYMBOL> <USDT>
+                           пример: /drain ANTUSDT 5
+
+                        2) В диапазоне: /drain <SYMBOL> <LOW> <HIGH> <USDT>
+                           пример: /drain ANTUSDT 0,000010 0,000020 5
+                           Цены можно писать с запятой или точкой.
+
+                        ⚠️ Ключи хранятся только в памяти процесса и пропадут при перезапуске.
+                        """);
                 return;
             }
 
@@ -111,7 +108,6 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
             }
 
             if (text.startsWith("/drain")) {
-                // как у тебя, плюс проверка ключей ...
                 String[] p = text.split("\\s+");
                 var a = MemoryDb.getAccountA(chatId);
                 var b = MemoryDb.getAccountB(chatId);
@@ -127,7 +123,7 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
                         return;
                     }
                     tg.reply(chatId, "▶️ Запускаю перелив: %s на %s USDT".formatted(symbol, usdt.stripTrailingZeros()));
-//                    drainService.startDrain(symbol, usdt, chatId, 20);
+                    drainService.startDrain(symbol, usdt, chatId);
                     return;
                 }
                 tg.reply(chatId, "Неверный формат. Пример: /drain ANTUSDT 5");

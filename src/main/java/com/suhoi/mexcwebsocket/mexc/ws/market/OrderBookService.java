@@ -5,6 +5,7 @@ import com.mxc.push.common.protobuf.PublicAggreBookTickerV3Api;
 import com.mxc.push.common.protobuf.PublicAggreDepthsV3Api;
 import com.mxc.push.common.protobuf.PublicIncreaseDepthsV3Api;
 import com.mxc.push.common.protobuf.PublicLimitDepthsV3Api;
+import com.suhoi.mexcwebsocket.domain.model.L1;
 import com.suhoi.mexcwebsocket.mexc.rest.MexcRestClient;
 import com.suhoi.mexcwebsocket.mexc.ws.core.MexcWsClient;
 import lombok.RequiredArgsConstructor;
@@ -34,6 +35,7 @@ public class OrderBookService implements MexcWsClient.Listener {
     private final Map<String, Long> lastVersion = new ConcurrentHashMap<>();
     private static final int BOOK_CAP = 50;        // храним верхние 50 на сторону (или 10/20 — как нужно)
     private static final int PARTIAL_LEVELS = 20;  // partial для ресинка
+    private static final long BOOK_STALE_MS = 1500; // сколько считаем стакан «свежим»
 
     // логи ордербука
     private final Map<String, AtomicBoolean> dirty = new ConcurrentHashMap<>();
@@ -43,7 +45,7 @@ public class OrderBookService implements MexcWsClient.Listener {
         return t;
     });
     private final int LOG_TOP_N = 50;       // сколько уровней печатать
-    private final long LOG_PERIOD_MS = 1000; // как часто печатать (если были изменения)
+    private final long LOG_PERIOD_MS = 100000; // как часто печатать (если были изменения)
 
     @PostConstruct
     void init() {
@@ -71,8 +73,8 @@ public class OrderBookService implements MexcWsClient.Listener {
                 }
                 ob.setLastUpdateTs(System.currentTimeMillis());
                 log.info("🧊 REST SNAPSHOT {} (top 5)\n{}", s, ob.topN(5));
-                ensureLoggerStarted(s);
-                markDirty(s);
+//                ensureLoggerStarted(s);
+//                markDirty(s);
             }
         } catch (Exception e) {
             log.warn("REST snapshot failed for {}: {}", s, e.getMessage());
@@ -249,5 +251,30 @@ public class OrderBookService implements MexcWsClient.Listener {
         } catch (Exception e) {
             log.warn("REST resync failed for {}: {}", s, e.getMessage());
         }
+    }
+
+    /** Снимок L1 для symbol (или null, если стакана нет). */
+    public L1 getSnapshotL1(String symbol) {
+        LocalOrderBook ob = books.get(symbol.toUpperCase());
+        return (ob == null) ? null : ob.getSnapshotL1();
+    }
+
+    /** Лучшая ask-цена или null. */
+    public BigDecimal bestAsk(String symbol) {
+        LocalOrderBook ob = books.get(symbol.toUpperCase());
+        return (ob == null) ? null : ob.bestAskPx();
+    }
+
+    /** Лучшая bid-цена или null. */
+    public BigDecimal bestBid(String symbol) {
+        LocalOrderBook ob = books.get(symbol.toUpperCase());
+        return (ob == null) ? null : ob.bestBidPx();
+    }
+
+    public boolean isFresh(String symbol) {
+        LocalOrderBook ob = books.get(symbol.toUpperCase());
+        if (ob == null) return false;
+        long age = System.currentTimeMillis() - ob.getLastUpdateTs();
+        return age >= 0 && age <= BOOK_STALE_MS;
     }
 }

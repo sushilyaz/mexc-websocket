@@ -3,6 +3,8 @@ package com.suhoi.mexcwebsocket.application;
 
 import com.suhoi.mexcwebsocket.db.MemoryDb;
 import com.suhoi.mexcwebsocket.domain.model.Creds;
+import com.suhoi.mexcwebsocket.domain.model.SymbolFilters;
+import com.suhoi.mexcwebsocket.mexc.rest.MexcRestFacade;
 import com.suhoi.mexcwebsocket.mexc.ws.market.OrderBookService;
 import com.suhoi.mexcwebsocket.mexc.ws.user.UserStreamRegistry;
 import lombok.RequiredArgsConstructor;
@@ -18,7 +20,8 @@ import static com.suhoi.mexcwebsocket.util.FormatHelpers.fmt;
 @RequiredArgsConstructor
 public class DrainService {
     private final UserStreamRegistry userStreams;
-    private final OrderBookService orderBooks;   // ⬅️ добавили
+    private final OrderBookService orderBooks;
+    private final MexcRestFacade mexcRestFacade;
 
     public void startDrain(String symbol, BigDecimal usdtAmount, Long chatId) {
         Creds credsA = MemoryDb.getAccountA(chatId);
@@ -45,6 +48,11 @@ public class DrainService {
             log.warn("⚠️ Symbol is empty — L2 not started");
         }
 
-        // Здесь дальше — твоя бизнес-логика дренажа, уже можешь использовать orderBooks.debugTopN(symbol, 5)
+        // Получаем характеристики монеты для дальнейшего рассчета(tickSize, stepSize, minNotional, minQty, quotePrecision)
+        SymbolFilters symbolFilters = mexcRestFacade.getSymbolFilters(symbol);
+
+        // покупаем по рынку путем выставления лимитки над спредом
+        String orderId = mexcRestFacade.limitBuyAboveSpreadA(symbol, usdtAmount, chatId);
+
     }
 }
