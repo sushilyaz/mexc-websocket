@@ -24,8 +24,8 @@ public final class MexcChannel {
         return "spot@public.kline.v3.api.pb@" + up(symbol) + "@" + interval;
     }
     // FULL snapshot L2 (limit=5/10/20/50/100/...) — начальная и периодическая «база»
-    public static String limitDepth(String symbol, int limit) {
-        return "spot@public.limit.depths.v3.api.pb@" + limit + "@" + up(symbol);
+    public static String limitDepth(String symbol, int level) {
+        return "spot@public.limit.depth.v3.api.pb@" + up(symbol) + "@" + level;
     }
     // агрегированный depth 10/100ms
     public static String aggreDepth(String symbol, int intervalMs) {

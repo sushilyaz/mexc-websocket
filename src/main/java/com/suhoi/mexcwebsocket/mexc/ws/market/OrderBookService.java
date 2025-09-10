@@ -31,7 +31,9 @@ public class OrderBookService implements MexcWsClient.Listener {
     private final Map<String, LocalOrderBook> books = new ConcurrentHashMap<>();
     /** symbol -> подписан ли уже на каналы */
     private final Map<String, Boolean> subscribed = new ConcurrentHashMap<>();
-
+    private final Map<String, Long> lastVersion = new ConcurrentHashMap<>();
+    private static final int BOOK_CAP = 50;        // храним верхние 50 на сторону (или 10/20 — как нужно)
+    private static final int PARTIAL_LEVELS = 20;  // partial для ресинка
 
     // логи ордербука
     private final Map<String, AtomicBoolean> dirty = new ConcurrentHashMap<>();
@@ -57,7 +59,6 @@ public class OrderBookService implements MexcWsClient.Listener {
         try {
             var snap = rest.getDepthSnapshot(s, 100);
             if (snap != null) {
-                ob.reset();
                 if (snap.getBids() != null) {
                     for (var it : snap.getBids()) {
                         ob.putBid(MexcRestClient.bd(it.get(0)), MexcRestClient.bd(it.get(1)));
@@ -79,9 +80,9 @@ public class OrderBookService implements MexcWsClient.Listener {
 
         // 2) WS-подписки (идемпотентно)
         if (subscribed.putIfAbsent(s, Boolean.TRUE) == null) {
-            ws.subscribe(MexcChannel.aggreDepth(s, 100));     // ← используем это
-            ws.subscribe(MexcChannel.bookTicker(s, 100));     // топ для надёжности/быстроты
-//            ws.subscribe(MexcChannel.diffDepth(s, 100)); // может быть Blocked — ок, fallback на тикер
+            ws.subscribe(MexcChannel.aggreDepth(s, 100));            // инкременты
+            ws.subscribe(MexcChannel.limitDepth(s, PARTIAL_LEVELS)); // топ-N снимки (ресинк/подстраховка)
+            ws.subscribe(MexcChannel.bookTicker(s, 100));            // L1 для сигналов
             log.info("📡 L2 tracking started for {}", s);
         }
     }
@@ -114,90 +115,100 @@ public class OrderBookService implements MexcWsClient.Listener {
     }
 
     @Override
-    public void onAggreDepth(String symbol, PublicAggreDepthsV3Api depth, long ts) {
+    public void onAggreDepth(String symbol, PublicAggreDepthsV3Api d, long ts) {
         final String s = symbol.toUpperCase();
-        LocalOrderBook ob = books.get(s);
+        var ob = books.get(s);
         if (ob == null) return;
 
-        try {
-            ob.reset();
-            for (int i = 0; i < depth.getBidsCount(); i++) {
-                var lvl = depth.getBids(i);
-                ob.putBid(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
-            }
-            for (int i = 0; i < depth.getAsksCount(); i++) {
-                var lvl = depth.getAsks(i);
-                ob.putAsk(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
-            }
-            ob.setLastUpdateTs(ts);
-            markDirty(s);            // триггер логгера
-            ensureLoggerStarted(s);
-//             log.debug("🔁 AGGRE {} {}", s, ob.topN(5)); // если хочешь видеть rebuild
-        } catch (Exception e) {
-            log.warn("AggreDepth parse error for {}: {}", s, e.toString());
+        Long from = parseLongSafe(d.getFromVersion());
+        Long to   = parseLongSafe(d.getToVersion());
+        Long prev = lastVersion.get(s);
+
+        if (prev != null && from != null && !from.equals(prev) && !from.equals(prev + 1)) {
+            log.warn("❗Gap on aggre.depth {} prev={} from={} to={} → resync", s, prev, from, to);
+            resyncFromRest(s);
+            return;
         }
+
+        for (int i = 0; i < d.getBidsCount(); i++) {
+            var lvl = d.getBids(i);
+            ob.putBid(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
+        }
+        for (int i = 0; i < d.getAsksCount(); i++) {
+            var lvl = d.getAsks(i);
+            ob.putAsk(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
+        }
+
+        if (to != null) lastVersion.put(s, to);
+        else if (from != null) lastVersion.put(s, from);
+
+        ob.setLastUpdateTs(ts);
+        ob.trim(BOOK_CAP);
+        markDirty(s);
+        ensureLoggerStarted(s);
     }
+
     @Override
     public void onLimitDepth(String symbol, PublicLimitDepthsV3Api depth, long ts) {
         final String s = symbol.toUpperCase();
-        LocalOrderBook ob = books.get(s);
-        if (ob == null) return; // не запрашивали этот символ
+        var ob = books.get(s);
+        if (ob == null) return;
 
-        // С нуля строим стакан
         ob.reset();
-        try {
-            // предполагаем структуру: lists asks/bids с полями price/quantity (string)
-            for (int i = 0; i < depth.getBidsCount(); i++) {
-                var lvl = depth.getBids(i);
-                BigDecimal px  = new BigDecimal(lvl.getPrice());
-                BigDecimal qty = new BigDecimal(lvl.getQuantity());
-                ob.putBid(px, qty);
-            }
-            for (int i = 0; i < depth.getAsksCount(); i++) {
-                var lvl = depth.getAsks(i);
-                BigDecimal px  = new BigDecimal(lvl.getPrice());
-                BigDecimal qty = new BigDecimal(lvl.getQuantity());
-                ob.putAsk(px, qty);
-            }
-            ob.setLastUpdateTs(ts);
-            log.debug("🔄 SNAPSHOT {} {}", s, ob.topN(5));
-            ensureLoggerStarted(symbol);
-            markDirty(symbol);
-        } catch (Exception e) {
-            log.warn("Snapshot parse error for {}: {}", s, e.toString());
+        for (int i = 0; i < depth.getBidsCount(); i++) {
+            var lvl = depth.getBids(i);
+            ob.putBid(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
         }
+        for (int i = 0; i < depth.getAsksCount(); i++) {
+            var lvl = depth.getAsks(i);
+            ob.putAsk(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
+        }
+        Long v = parseLongSafe(depth.getVersion());
+        if (v != null) lastVersion.put(s, v);
+
+        ob.setLastUpdateTs(ts);
+        ob.trim(BOOK_CAP);
+        markDirty(s);
     }
+
 
     @Override
     public void onDepthInc(String symbol, PublicIncreaseDepthsV3Api inc, long ts) {
         final String s = symbol.toUpperCase();
-        LocalOrderBook ob = books.get(s);
-        if (ob == null) return; // не запрашивали этот символ
+        var ob = books.get(s);
+        if (ob == null) return;
 
-        try {
-            // предполагаем такие же поля price/quantity (string) в обновлениях
-            for (int i = 0; i < inc.getBidsCount(); i++) {
-                var lvl = inc.getBids(i);
-                BigDecimal px  = new BigDecimal(lvl.getPrice());
-                BigDecimal qty = new BigDecimal(lvl.getQuantity());
-                ob.putBid(px, qty); // qty=0 => удалим уровень
-            }
-            for (int i = 0; i < inc.getAsksCount(); i++) {
-                var lvl = inc.getAsks(i);
-                BigDecimal px  = new BigDecimal(lvl.getPrice());
-                BigDecimal qty = new BigDecimal(lvl.getQuantity());
-                ob.putAsk(px, qty);
-            }
-            ob.setLastUpdateTs(ts);
-            // 👇 временно, чтобы увидеть, что диффы льются
-            log.info("Δ {} bids={} asks={}", s, inc.getBidsCount(), inc.getAsksCount());
+        Long v = parseLongSafe(inc.getVersion()); // если этого поля реально нет — см. ниже
+        Long prev = lastVersion.get(s);
 
-            ensureLoggerStarted(s);
-            markDirty(s);
-        } catch (Exception e) {
-            log.warn("DepthInc parse error for {}: {}", s, e.toString());
+        if (v != null && prev != null && !v.equals(prev + 1)) {
+            log.warn("❗Gap on increase.depth {} prev={} v={} → resync", s, prev, v);
+            resyncFromRest(s);
+            return;
         }
+
+        for (int i = 0; i < inc.getBidsCount(); i++) {
+            var lvl = inc.getBids(i);
+            ob.putBid(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
+        }
+        for (int i = 0; i < inc.getAsksCount(); i++) {
+            var lvl = inc.getAsks(i);
+            ob.putAsk(new BigDecimal(lvl.getPrice()), new BigDecimal(lvl.getQuantity()));
+        }
+
+        if (v != null) lastVersion.put(s, v); // если v нет — не трогаем lastVersion, полагаемся на aggre.depth/partial
+        ob.setLastUpdateTs(ts);
+        ob.trim(BOOK_CAP);
+        markDirty(s);
+        ensureLoggerStarted(s);
     }
+
+    private static Long parseLongSafe(String v) {
+        try { return (v == null || v.isEmpty()) ? null : Long.parseLong(v); }
+        catch (Exception e) { return null; }
+    }
+
+
     private void markDirty(String symbol) {
         dirty.computeIfAbsent(symbol, k -> new AtomicBoolean()).set(true);
     }
@@ -220,5 +231,23 @@ public class OrderBookService implements MexcWsClient.Listener {
             return new AtomicBoolean(false);
         });
     }
-
+    private void resyncFromRest(String s) {
+        try {
+            var snap = rest.getDepthSnapshot(s, 100);
+            LocalOrderBook ob = books.get(s);
+            if (snap != null && ob != null) {
+                ob.reset();
+                if (snap.getBids() != null)
+                    for (var it : snap.getBids()) ob.putBid(MexcRestClient.bd(it.get(0)), MexcRestClient.bd(it.get(1)));
+                if (snap.getAsks() != null)
+                    for (var it : snap.getAsks()) ob.putAsk(MexcRestClient.bd(it.get(0)), MexcRestClient.bd(it.get(1)));
+                ob.trim(BOOK_CAP);
+                ob.setLastUpdateTs(System.currentTimeMillis());
+                markDirty(s);
+                log.info("🔁 REST resync {}", s);
+            }
+        } catch (Exception e) {
+            log.warn("REST resync failed for {}: {}", s, e.getMessage());
+        }
+    }
 }

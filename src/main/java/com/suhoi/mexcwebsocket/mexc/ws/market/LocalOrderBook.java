@@ -12,8 +12,6 @@ public class LocalOrderBook {
             new TreeMap<>((a, b) -> b.compareTo(a));
     private final NavigableMap<BigDecimal, BigDecimal> asks =
             new TreeMap<>();
-    private BigDecimal lastBestBidPx;
-    private BigDecimal lastBestAskPx;
     private volatile long lastUpdateTs;
 
     public LocalOrderBook(String symbol) {
@@ -34,31 +32,22 @@ public class LocalOrderBook {
     }
     public synchronized void applyBookTicker(BigDecimal bidPx, BigDecimal bidQty,
                                              BigDecimal askPx, BigDecimal askQty, long ts) {
-        // убрать старые best, если цена изменилась
-        if (lastBestBidPx != null && bidPx != null && bidPx.compareTo(lastBestBidPx) != 0) {
-            bids.remove(lastBestBidPx);
-        }
-        if (lastBestAskPx != null && askPx != null && askPx.compareTo(lastBestAskPx) != 0) {
-            asks.remove(lastBestAskPx);
-        }
-
-        if (bidPx != null) {
-            putBid(bidPx, bidQty == null ? BigDecimal.ZERO : bidQty);
-            lastBestBidPx = bidPx;
-        }
-        if (askPx != null) {
-            putAsk(askPx, askQty == null ? BigDecimal.ZERO : askQty);
-            lastBestAskPx = askPx;
-        }
+        // L1 может подправлять только те уровни, по которым пришёл qty.
+        // Ничего не удаляем «по смене беста» — второй уровень мог остаться!
+        if (bidPx != null && bidQty != null) putBid(bidPx, bidQty);
+        if (askPx != null && askQty != null) putAsk(askPx, askQty);
         lastUpdateTs = ts;
     }
 
     public synchronized void reset() {
         bids.clear();
         asks.clear();
-        lastBestBidPx = null;
-        lastBestAskPx = null;
         lastUpdateTs = 0L;
+    }
+    // держим только верхние N уровней на сторону (например, 50)
+    public synchronized void trim(int n) {
+        while (bids.size() > n) bids.pollLastEntry();
+        while (asks.size() > n) asks.pollLastEntry();
     }
     /** Снимок верхних N уровней (для логов/статуса). */
     // внутри LocalOrderBook
