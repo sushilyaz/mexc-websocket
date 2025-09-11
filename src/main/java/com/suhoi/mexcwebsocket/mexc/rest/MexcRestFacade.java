@@ -45,7 +45,6 @@ public class MexcRestFacade {
         return MexcMapper.mapToFilters(symbolInformation, symbol);
     }
 
-    // MexcRestFacade.java
     public void placeLimitSellA(String symbol, BigDecimal price, BigDecimal qty, Long chatId, String clientId) {
         Creds creds = MemoryDb.getAccountA(chatId);
         if (creds == null) throw new IllegalArgumentException("Нет ключей для accountA");
@@ -235,6 +234,158 @@ public class MexcRestFacade {
                 creds.getApiKey(), creds.getSecret()
         );
     }
+    public void placeLimitBuyAAt(String symbol,
+                                 BigDecimal price,
+                                 BigDecimal qty,
+                                 Long chatId,
+                                 String clientId) {
+        Creds creds = MemoryDb.getAccountA(chatId);
+        if (creds == null) throw new IllegalArgumentException("Нет ключей для accountA");
+
+        final String s = symbol.toUpperCase();
+
+        SymbolFilters f = getSymbolFilters(s);
+        BigDecimal declaredTick = f.getTickSize();
+        Integer qp = f.getQuotePrecision();
+
+        L1 l1 = orderBookService.getSnapshotL1(s);
+        BigDecimal bid = (l1 != null) ? l1.getBid() : null;
+        BigDecimal ask = (l1 != null) ? l1.getAsk() : null;
+
+        // эффективный тик: если filters «врут», берём масштаб по L1/plan
+        BigDecimal tickEff = effectiveTickForBuy(s, price, bid, ask, f);
+
+        // для BUY не выходим выше плановой цены: подровняем вниз к сетке
+        BigDecimal pPlanned = price;
+        BigDecimal pSend = MarketMath.floorToStep(pPlanned, tickEff);
+
+        // нормализуем количество
+        BigDecimal q = MarketMath.normalizeQty(qty, f);
+
+        // minNotional/minQty проверяем на фактической цене отправки
+        BigDecimal effMinNotional = MarketMath.resolveMinNotional(s, f.getMinNotional());
+        BigDecimal minQtyNeed = MarketMath.minQtyForNotional(pSend, f.getStepSize(), effMinNotional);
+        if (q.compareTo(minQtyNeed) < 0 || q.compareTo(f.getMinQty()) < 0) {
+            log.warn("BUY[A] {}: qty={} не проходит minNotional/minQty при p={}",
+                    s,
+                    q.stripTrailingZeros().toPlainString(),
+                    pSend.stripTrailingZeros().toPlainString());
+            return;
+        }
+
+        log.info("BUY[A] {} plan={} -> send={} tick={} (declared={}) qp={} | bid={} ask={}",
+                s,
+                pPlanned.stripTrailingZeros().toPlainString(),
+                pSend.stripTrailingZeros().toPlainString(),
+                tickEff.stripTrailingZeros().toPlainString(),
+                declaredTick == null ? "null" : declaredTick.stripTrailingZeros().toPlainString(),
+                qp,
+                bid == null ? "null" : bid.stripTrailingZeros().toPlainString(),
+                ask == null ? "null" : ask.stripTrailingZeros().toPlainString()
+        );
+
+        mexcRestClient.newOrder(
+                s, "BUY", "LIMIT", "GTC",
+                q.toPlainString(), pSend.toPlainString(), clientId,
+                creds.getApiKey(), creds.getSecret()
+        );
+    }
+
+    /**
+     * Эффективный тик для BUY: как для SELL, но лог — для BUY.
+     */
+    private BigDecimal effectiveTickForBuy(String symbol,
+                                           BigDecimal plan,
+                                           BigDecimal bid,
+                                           BigDecimal ask,
+                                           SymbolFilters f) {
+        BigDecimal tick = f.getTickSize();
+        Integer qp = f.getQuotePrecision();
+
+        boolean needOverride =
+                tick == null || tick.signum() <= 0
+                        || notMultiple(plan, tick)
+                        || (bid != null && notMultiple(bid, tick))
+                        || (ask != null && notMultiple(ask, tick));
+
+        if (needOverride) {
+            int scale = Math.max(
+                    Math.max(safeScale(plan), Math.max(safeScale(bid), safeScale(ask))),
+                    (qp != null ? qp : 0)
+            );
+            if (scale <= 0 && tick != null) scale = Math.max(scale, safeScale(tick));
+            if (scale <= 0) scale = 6;
+
+            tick = BigDecimal.ONE.movePointLeft(scale);
+            log.warn("[symbol:{}] BUY: override tick by L1/plan -> {}", symbol, tick.stripTrailingZeros().toPlainString());
+        }
+        return tick;
+    }
+
+    // ====== НОВОЕ: «обходной» SELL(B) ниже спреда (IOC) в нашу BUY[A] ======
+    public String limitSellBelowSpreadB(String symbol,
+                                        BigDecimal pBuy,        // наша верхняя BUY[A]
+                                        BigDecimal qtyWanted,
+                                        Long chatId,
+                                        String clientId) {
+        Creds creds = MemoryDb.getAccountB(chatId);
+        if (creds == null) throw new IllegalArgumentException("Нет ключей для accountB (chatId=" + chatId + ")");
+
+        SymbolFilters f = getSymbolFilters(symbol);
+        BigDecimal tick = f.getTickSize();
+
+        // 1) Пересечение относительно нашей BUY[A]
+        BigDecimal bump = tick.multiply(BigDecimal.valueOf(Math.max(0, TICK_ABOVE)));
+        BigDecimal pCrossByBuy = (pBuy != null)
+                ? MarketMath.floorToStep(pBuy.subtract(bump), tick)
+                : null;
+
+        // 2) Пересечение относительно bid (зеркальный helper)
+        BigDecimal pCrossByBid = priceBelowBid(symbol);
+
+        // 3) Итоговая агрессивная цена: идём как можно ниже из двух
+        BigDecimal pCross = (pCrossByBuy != null) ? pCrossByBuy.min(pCrossByBid) : pCrossByBid;
+        if (pCross == null || pCross.signum() <= 0) pCross = tick; // защита
+
+        // qty → к сетке
+        BigDecimal q = MarketMath.normalizeQty(qtyWanted, f);
+
+        // minNotional/minQty валидируем на pCross
+        BigDecimal effMinNotional = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
+        BigDecimal minQtyNeed = MarketMath.minQtyForNotional(pCross, f.getStepSize(), effMinNotional);
+        if (q.compareTo(minQtyNeed) < 0 || q.compareTo(f.getMinQty()) < 0) {
+            log.warn("SELL[B][AGGR] {}: qty={} не проходит minNotional/minQty при pCross={}",
+                    symbol, q.stripTrailingZeros(), pCross.stripTrailingZeros());
+            return null;
+        }
+
+        // Прогноз выручки/комиссии:
+        // агрессивный лимит SELL матчит по цене контрагента (maker). Если наша BUY[A] — топовый bid,
+        // фактическая цена будет именно она. Для логов возьмём «ожидаемую»:
+        L1 l1 = orderBookService.getSnapshotL1(symbol);
+        BigDecimal expectedTradePrice = (pBuy != null) ? pBuy
+                : (l1 != null && l1.getBid() != null) ? l1.getBid()
+                : pCross;
+        BigDecimal proceeds = expectedTradePrice.multiply(q);
+        BigDecimal fee = proceeds.multiply(TAKER_FEE_B);
+        int qp = Math.max(0, f.getQuotePrecision());
+
+        log.info("SELL[B][AGGR] plan: symbol={} pBuy={} pCross={} qty={} proceeds~{} fee~{} net~{}",
+                symbol,
+                pBuy == null ? "null" : pBuy.stripTrailingZeros().toPlainString(),
+                pCross.stripTrailingZeros().toPlainString(),
+                q.stripTrailingZeros().toPlainString(),
+                proceeds.setScale(qp, RoundingMode.DOWN).stripTrailingZeros().toPlainString(),
+                fee.setScale(qp, RoundingMode.DOWN).stripTrailingZeros().toPlainString(),
+                proceeds.subtract(fee).setScale(qp, RoundingMode.DOWN).stripTrailingZeros().toPlainString()
+        );
+
+        return mexcRestClient.newOrder(
+                symbol, "SELL", "LIMIT", "IOC",
+                q.toPlainString(), pCross.toPlainString(), clientId,
+                creds.getApiKey(), creds.getSecret()
+        );
+    }
 
     /**
      * Цена НАД спредом (для BUY) на базе локального стакана:
@@ -289,32 +440,63 @@ public class MexcRestFacade {
 
         return p;
     }
+
+    /**
+     * Цена НИЖЕ спреда (для SELL): bid - N * tickSize,
+     * аккуратно к сетке и с гарантией: строго < bid.
+     */
+    private BigDecimal priceBelowBid(String symbol) {
+        SymbolFilters f = getSymbolFilters(symbol);
+        BigDecimal tick = f.getTickSize();
+
+        L1 l1 = orderBookService.getSnapshotL1(symbol);
+        BigDecimal bid = (l1 != null) ? l1.getBid() : null;
+        BigDecimal ask = (l1 != null) ? l1.getAsk() : null;
+
+        if (!orderBookService.isFresh(symbol)) {
+            log.debug("L1 for {} is stale; tsAge={}ms",
+                    symbol, (l1 == null ? -1 : (System.currentTimeMillis() - l1.getTs())));
+        }
+
+        // базовая точка: bid (зеркалим), иначе ask, иначе один тик
+        BigDecimal base = (bid != null && bid.signum() > 0) ? bid
+                : (ask != null && ask.signum() > 0) ? ask
+                : (tick != null && tick.signum() > 0) ? tick
+                : new BigDecimal("0.00000001");
+
+        int n = Math.max(1, TICK_ABOVE);
+        BigDecimal raw = base.subtract(tick.multiply(BigDecimal.valueOf(n)));
+
+        // зеркалим логику: с «низа» тянемся как можно ближе к bid — ceil к сетке
+        BigDecimal p = MarketMath.ceilToStep(raw, tick);
+
+        // гарантия, что строго ниже bid
+        if (bid != null && bid.signum() > 0 && p.compareTo(bid) >= 0) {
+            p = MarketMath.ceilToStep(bid.subtract(tick), tick);
+            if (p.compareTo(bid) >= 0) {
+                // если bid «не по сетке» — добросим ещё тик
+                p = MarketMath.ceilToStep(bid.subtract(tick.multiply(BigDecimal.valueOf(2))), tick);
+            }
+        }
+
+        p = MarketMath.normalizePrice(p, tick);
+
+        log.info("[PRICE_BELOW_BID] {} bid={} ticks={} tick={} -> price={}",
+                symbol,
+                (bid == null ? "null" : bid.stripTrailingZeros().toPlainString()),
+                n,
+                tick.stripTrailingZeros().toPlainString(),
+                p.stripTrailingZeros().toPlainString());
+
+        return p;
+    }
+
     private static boolean notMultiple(BigDecimal px, BigDecimal step) {
         return px != null && step != null && step.signum() > 0
                 && px.remainder(step).compareTo(BigDecimal.ZERO) != 0;
     }
     private static int safeScale(BigDecimal v) {
         return v == null ? 0 : v.scale();
-    }
-    private BigDecimal effectiveTick(String symbol,
-                                     BigDecimal plan,
-                                     BigDecimal bid,
-                                     BigDecimal ask,
-                                     SymbolFilters f) {
-        BigDecimal tick = f.getTickSize();
-        Integer qp = f.getQuotePrecision();
-
-        if (tick == null || tick.signum() <= 0
-                || notMultiple(plan, tick)
-                || notMultiple(bid, tick)
-                || notMultiple(ask, tick)) {
-
-            int scale = Math.max(Math.max(safeScale(bid), safeScale(ask)), (qp != null ? qp : 0));
-            if (scale > 0) tick = BigDecimal.ONE.movePointLeft(scale);
-            // Лог — чтобы видеть, что именно починило ситуацию
-            log.warn("[symbol:{}] SELL: override tick by L1/plan -> {}", symbol, tick.toPlainString());
-        }
-        return tick;
     }
 
 }

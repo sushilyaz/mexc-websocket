@@ -15,6 +15,8 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import java.math.BigDecimal;
 import java.util.Map;
+import java.util.NavigableMap;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -114,6 +116,15 @@ public class OrderBookService implements MexcWsClient.Listener {
         } catch (Exception e) {
             log.debug("BookTicker parse error for {}: {}", s, e.toString());
         }
+    }
+    // mexc/ws/market/OrderBookService.java
+    public NavigableMap<BigDecimal, BigDecimal> asksSnapshot(String symbol) {
+        LocalOrderBook ob = books.get(symbol.toUpperCase());
+        return (ob == null) ? new TreeMap<>() : ob.copyAsks();
+    }
+    public NavigableMap<BigDecimal, BigDecimal> bidsSnapshot(String symbol) {
+        LocalOrderBook ob = books.get(symbol.toUpperCase());
+        return (ob == null) ? new TreeMap<>((a, b)->b.compareTo(a)) : ob.copyBids();
     }
 
     @Override

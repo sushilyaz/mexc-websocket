@@ -18,7 +18,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -153,8 +156,9 @@ public class DrainService {
         log.info("A BUY placed: symbol={} clientId={} orderId={}", symbol, buyAClientId, orderId);
     }
 
+    // DrainService.java
+
     private BigDecimal executeCycle(Long chatId, DrainSession s) {
-        // ШАГ 1 определяем нижнюю границу и выставляем лимитный ордер на этой цене + SAFE_GUARD
         final String symbol = s.getSymbol();
 
         SymbolFilters f = mexcRestFacade.getSymbolFilters(symbol);
@@ -171,22 +175,23 @@ public class DrainService {
         }
 
         log.info("[SELL_PLANNED] {} nearSell={} planQtyA={}", symbol, fmt(pSell), fmt(s.getQtyA()));
+        final Map<BigDecimal, BigDecimal> myAsks = new ConcurrentHashMap<>();
 
-        // 2) SELL(A) → подписка по clientId
         String sellClientId = UUID.randomUUID().toString().replace("-", "");
         s.setSellOrderId(sellClientId);
         s.setPSell(pSell);
         s.setState(DrainSession.State.A_SELL_PLACED);
+
         var subRef = new AtomicReference<OrderEventBus.Subscription>();
         OrderEventBus.Subscription sub = orderEventBus.subscribe(ev -> {
-            // фильтр уже стоит по clientId
 
             if (ev instanceof OrderEvent.OrderAccepted a) {
-                // Ордер A SELL принят (=NEW). Сразу отправляем агрессивный BUY на B
-                BigDecimal qtyPlanned = MarketMath.normalizeQty(s.getQtyA(), f); // f из начала executeCycle
+                BigDecimal qtyPlanned = MarketMath.normalizeQty(s.getQtyA(), f);
                 String buyBClientId = UUID.randomUUID().toString().replace("-", "");
 
-                // отдельная подписка под BUY(B)
+                myAsks.clear();
+                myAsks.put(s.getPSell(), qtyPlanned);
+
                 var subBRef = new AtomicReference<OrderEventBus.Subscription>();
                 OrderEventBus.Subscription subB = orderEventBus.subscribe(evB -> {
                     if (evB instanceof OrderEvent.OrderPartiallyFilled pb) {
@@ -203,17 +208,15 @@ public class DrainService {
                                 fb.avgPrice().stripTrailingZeros(),
                                 fb.cumulativeQuote().stripTrailingZeros());
 
-                        s.setLastSpentB(fb.cumulativeQuote()); // сколько USDT реально ушло на B
+                        s.setLastSpentB(fb.cumulativeQuote());
                         OrderEventBus.Subscription oldB = subBRef.getAndSet(null);
                         if (oldB != null) oldB.close();
 
                     } else if (evB instanceof OrderEvent.OrderCanceled cb) {
-                        // IOC → возможен частичный fill + cancel остатка
                         BigDecimal filled = cb.cumulativeQty() == null ? BigDecimal.ZERO : cb.cumulativeQty();
                         if (filled.compareTo(qtyPlanned) < 0) {
-                            // не весь наш A SELL забрали → фронт-ран или нехватка USDT на комиссию
                             s.autoPause(DrainSession.AutoPauseReason.FRONT_RUN,
-                                    "BUY[B] filled="+fmt(filled)+" < planned="+fmt(qtyPlanned));
+                                    "BUY[B] filled=" + fmt(filled) + " < planned=" + fmt(qtyPlanned));
                         }
                         OrderEventBus.Subscription oldB = subBRef.getAndSet(null);
                         if (oldB != null) oldB.close();
@@ -226,7 +229,6 @@ public class DrainService {
                 }, OrderEventBus.byClientId(buyBClientId));
                 subBRef.set(subB);
 
-                // таймаут на BUY(B)
                 drainScheduler.schedule(() -> {
                     if (subBRef.get() != null && s.getState() != DrainSession.State.AUTO_PAUSE) {
                         s.autoPause(DrainSession.AutoPauseReason.TIMEOUT, "No WS status for B BUY");
@@ -235,7 +237,6 @@ public class DrainService {
                     }
                 }, 3, TimeUnit.SECONDS);
 
-                // отправляем BUY(B) с пересечением pSell
                 try {
                     String oidB = mexcRestFacade.limitBuyAboveSpreadB(symbol, s.getPSell(), qtyPlanned, chatId, buyBClientId);
                     if (oidB == null) {
@@ -274,15 +275,136 @@ public class DrainService {
                 OrderEventBus.Subscription old = subRef.getAndSet(null);
                 if (old != null) old.close();
 
-                // шаг завершён; в вызывающем коде переходи к A_BUY_PLACED (верхняя кромка) и B_MKT_SELL_SENT
-                // возвращаемое значение можешь использовать как «сигнал» продолжения
-                // здесь вернём null — ты итерацию контролируешь снаружи по state
-                // return fEv.cumulativeQty();
+                // === [UPPER-LEG] ===
+                try {
+                    BigDecimal pBuyUpper = mexcWsFacade.getNearUpperSpreadPriceExcludingMine(
+                            symbol,
+                            java.util.Collections.emptyMap(),  // myBids
+                            myAsks                              // myAsks (исключаем наш SELL[A])
+                    );
+                    s.setPBuy(pBuyUpper);
+                    log.info("[BUY_UPPER_PLANNED/X] {} nearBuy={} (исключая наш SELL[A] @ {})",
+                            symbol, fmt(pBuyUpper), fmt(s.getPSell()));
+
+                    // Объём: симметрично — сколько держит B (это то, что мы только что продали)
+                    BigDecimal qtyUpper = MarketMath.normalizeQty(s.getQtyA(), f);
+
+                    // Проверим minNotional/minQty на pBuyUpper (как и в первой ноге)
+                    BigDecimal effMinNotional = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
+                    BigDecimal minQtyNeedUpper = MarketMath.minQtyForNotional(pBuyUpper, f.getStepSize(), effMinNotional);
+                    if (qtyUpper.compareTo(minQtyNeedUpper) < 0 || qtyUpper.compareTo(f.getMinQty()) < 0) {
+                        s.autoPause(DrainSession.AutoPauseReason.INSUFFICIENT_BALANCE,
+                                "qtyUpper < minNotional для BUY[A] @ " + fmt(pBuyUpper) +
+                                        " (qtyUpper=" + fmt(qtyUpper) + ", min=" + fmt(minQtyNeedUpper) + ")");
+                        return;
+                    }
+
+                    // Подписка на BUY[A] @ верхней кромке
+                    String buyAUpperClientId = UUID.randomUUID().toString().replace("-", "");
+                    var subAUpperRef = new AtomicReference<OrderEventBus.Subscription>();
+                    OrderEventBus.Subscription subAUpper = orderEventBus.subscribe(evA -> {
+                        if (evA instanceof OrderEvent.OrderAccepted acc) {
+                            // как только BUY[A] принят — сразу «обходной» SELL[B] (IOC) в него
+                            String sellBBelowClientId = UUID.randomUUID().toString().replace("-", "");
+
+                            var subSellBRef = new AtomicReference<OrderEventBus.Subscription>();
+                            OrderEventBus.Subscription subSellB = orderEventBus.subscribe(evB2 -> {
+                                if (evB2 instanceof OrderEvent.OrderPartiallyFilled pp) {
+                                    log.info("📥 {} SELL[B] PARTIAL cid={} cumQty={} avg={} quote={}",
+                                            symbol, pp.clientId(),
+                                            pp.cumulativeQty().stripTrailingZeros(),
+                                            pp.avgPrice().stripTrailingZeros(),
+                                            pp.cumulativeQuote().stripTrailingZeros());
+                                } else if (evB2 instanceof OrderEvent.OrderFilled ff) {
+                                    log.info("✅ {} SELL[B] FILLED cid={} cumQty={} avg={} quote={} (учтена тейкерская комиссия в USDT)",
+                                            symbol, ff.clientId(),
+                                            ff.cumulativeQty().stripTrailingZeros(),
+                                            ff.avgPrice().stripTrailingZeros(),
+                                            ff.cumulativeQuote().stripTrailingZeros());
+                                    OrderEventBus.Subscription oldB2 = subSellBRef.getAndSet(null);
+                                    if (oldB2 != null) oldB2.close();
+                                } else if (evB2 instanceof OrderEvent.OrderCanceled cc) {
+                                    log.warn("❗ {} SELL[B] IOC canceled (cum={})", symbol, fmt(cc.cumulativeQty()));
+                                    OrderEventBus.Subscription oldB2 = subSellBRef.getAndSet(null);
+                                    if (oldB2 != null) oldB2.close();
+                                } else if (evB2 instanceof OrderEvent.OrderRejected rr) {
+                                    s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "B SELL rejected: " + rr.reason());
+                                    OrderEventBus.Subscription oldB2 = subSellBRef.getAndSet(null);
+                                    if (oldB2 != null) oldB2.close();
+                                }
+                            }, OrderEventBus.byClientId(sellBBelowClientId));
+                            subSellBRef.set(subSellB);
+
+                            // таймаут на SELL[B]
+                            drainScheduler.schedule(() -> {
+                                if (subSellBRef.get() != null && s.getState() != DrainSession.State.AUTO_PAUSE) {
+                                    s.autoPause(DrainSession.AutoPauseReason.TIMEOUT, "No WS status for B SELL");
+                                    OrderEventBus.Subscription oldB2 = subSellBRef.getAndSet(null);
+                                    if (oldB2 != null) oldB2.close();
+                                }
+                            }, 3, TimeUnit.SECONDS);
+
+                            try {
+                                String oidSellB = mexcRestFacade.limitSellBelowSpreadB(
+                                        symbol, s.getPBuy(), qtyUpper, chatId, sellBBelowClientId);
+                                if (oidSellB == null) {
+                                    s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "B SELL REST failed/null orderId");
+                                    OrderEventBus.Subscription oldB2 = subSellBRef.getAndSet(null);
+                                    if (oldB2 != null) oldB2.close();
+                                } else {
+                                    log.info("➡️ {} SELL[B] placed: cidB={} orderIdB={} qty={}",
+                                            symbol, sellBBelowClientId, oidSellB, fmt(qtyUpper));
+                                }
+                            } catch (Exception ex) {
+                                log.error("SELL[B] send failed: {}", ex.getMessage(), ex);
+                                s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "B MARKET-LIKE SELL send failed");
+                                OrderEventBus.Subscription oldB2 = subSellBRef.getAndSet(null);
+                                if (oldB2 != null) oldB2.close();
+                            }
+
+                        } else if (evA instanceof OrderEvent.OrderFilled fA) {
+                            log.info("✅ {} BUY[A] FILLED cid={} cumQty={} avg={} quote={}",
+                                    symbol, fA.clientId(),
+                                    fA.cumulativeQty().stripTrailingZeros(),
+                                    fA.avgPrice().stripTrailingZeros(),
+                                    fA.cumulativeQuote().stripTrailingZeros());
+                            OrderEventBus.Subscription oldA = subAUpperRef.getAndSet(null);
+                            if (oldA != null) oldA.close();
+
+                            // тут можно стартовать следующий цикл (если хочешь зациклить)
+
+                        } else if (evA instanceof OrderEvent.OrderCanceled cA) {
+                            log.warn("❗ {} BUY[A] canceled (cum={})", symbol, fmt(cA.cumulativeQty()));
+                            OrderEventBus.Subscription oldA = subAUpperRef.getAndSet(null);
+                            if (oldA != null) oldA.close();
+
+                        } else if (evA instanceof OrderEvent.OrderRejected rA) {
+                            s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "A BUY rejected: " + rA.reason());
+                            OrderEventBus.Subscription oldA = subAUpperRef.getAndSet(null);
+                            if (oldA != null) oldA.close();
+                        }
+                    }, OrderEventBus.byClientId(buyAUpperClientId));
+                    subAUpperRef.set(subAUpper);
+
+                    // таймаут на BUY[A] верхней кромки
+                    drainScheduler.schedule(() -> {
+                        if (subAUpperRef.get() != null && s.getState() != DrainSession.State.AUTO_PAUSE) {
+                            s.autoPause(DrainSession.AutoPauseReason.TIMEOUT, "No WS status for A BUY@upper");
+                            OrderEventBus.Subscription oldA = subAUpperRef.getAndSet(null);
+                            if (oldA != null) oldA.close();
+                        }
+                    }, 3, TimeUnit.SECONDS);
+
+                    // Отправляем лимитную BUY[A] по верхней кромке
+                    mexcRestFacade.placeLimitBuyAAt(symbol, pBuyUpper, qtyUpper, chatId, buyAUpperClientId);
+
+                } catch (Exception ex) {
+                    log.warn("[BUY_UPPER_PLANNED/X] {} failed: {}", symbol, ex.toString());
+                }
 
             } else if (ev instanceof OrderEvent.OrderCanceled c) {
-                // Для GTC SELL странно, но всякое бывает
                 s.autoPause(DrainSession.AutoPauseReason.PARTIAL_MISMATCH,
-                        "SELL canceled (cum="+fmt(c.cumulativeQty())+")");
+                        "SELL canceled (cum=" + fmt(c.cumulativeQty()) + ")");
                 OrderEventBus.Subscription old = subRef.getAndSet(null);
                 if (old != null) old.close();
 
@@ -294,7 +416,6 @@ public class DrainService {
         }, OrderEventBus.byClientId(sellClientId));
         subRef.set(sub);
 
-        // 3) (необязательный) timeout-guard, чтобы не повиснуть навсегда
         drainScheduler.schedule(() -> {
             if (subRef.get() != null && s.getState() != DrainSession.State.A_SELL_FILLED && s.getState() != DrainSession.State.AUTO_PAUSE) {
                 s.autoPause(DrainSession.AutoPauseReason.TIMEOUT, "No WS status for A BUY");
@@ -304,9 +425,9 @@ public class DrainService {
         }, 3, TimeUnit.SECONDS);
 
         mexcRestFacade.placeLimitSellA(s.getSymbol(), pSell, s.getQtyA(), chatId, sellClientId);
-        // далее эта лимитка как появится в стакане (это надо увидеть через вебсокет) - сразу же выкупаем ее по рынку с аккаунта Б
         return null;
     }
+
 
     /**
      * Унифицированная автопауза + подробный лог в консоль.
