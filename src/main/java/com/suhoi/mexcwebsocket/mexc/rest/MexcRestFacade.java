@@ -9,6 +9,7 @@ import com.suhoi.mexcwebsocket.domain.model.SymbolFilters;
 import com.suhoi.mexcwebsocket.infra.OrderEventBus;
 import com.suhoi.mexcwebsocket.mapper.MexcMapper;
 import com.suhoi.mexcwebsocket.mexc.rest.dto.response.SymbolInfoResponseDto;
+import com.suhoi.mexcwebsocket.mexc.ws.market.BookDerivedFiltersResolver;
 import com.suhoi.mexcwebsocket.mexc.ws.market.OrderBookService;
 import com.suhoi.mexcwebsocket.util.MarketMath;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +17,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.math.RoundingMode;
+import java.util.Collection;
+import java.util.NavigableMap;
+
+import static com.suhoi.mexcwebsocket.db.Cache.exchangeInfoCache;
 
 @Component
 @RequiredArgsConstructor
@@ -28,21 +34,98 @@ public class MexcRestFacade {
     private static final int TICK_ABOVE = 4;
     private final OrderBookService orderBookService;
     private final OrderEventBus orderEventBus;
+    private final BookDerivedFiltersResolver bookDerivedFiltersResolver;
     // комиссия тейкера 0.05% (для BUY в USDT-парах комиссия в USDT)
     public static final BigDecimal TAKER_FEE_B = new BigDecimal("0.0005");
     // на сколько тиков поднять лимитную цену BUY(B) над pSell (0 или 1 обычно достаточно)
 
     public SymbolFilters getSymbolFilters(String symbol) {
-        CachedSymbolInfo cachedSymbolInfo = Cache.exchangeInfoCache.get(symbol);
+        String key = symbol.toUpperCase();
 
-        long now = System.currentTimeMillis();
-        if (cachedSymbolInfo != null && (now - cachedSymbolInfo.getLoadedAt()) < EXCHANGE_INFO_TTL_MS) {
-            return cachedSymbolInfo.getFilters();
+        // 1) cache
+        CachedSymbolInfo cachedSymbolInfo = exchangeInfoCache.get(key);
+        if (cachedSymbolInfo != null) {
+            SymbolFilters filters = cachedSymbolInfo.getFilters();
+            if (filters != null && isSaneAgainstBook(key, filters))
+                return filters;
         }
 
-        SymbolInfoResponseDto symbolInformation = mexcRestClient.getSymbolInformation(symbol);
-        log.info("[symbol:{}] qp={}", symbol, symbolInformation.getQuotePrecision());
-        return MexcMapper.mapToFilters(symbolInformation, symbol);
+        // 2) exchangeInfo
+        SymbolFilters fromEx = null;
+        try {
+            fromEx = MexcMapper.mapToFilters(mexcRestClient.getSymbolInformation(key), symbol); // как и раньше
+        } catch (Exception ex) {
+            log.warn("[{}] exchangeInfo failed: {}", key, ex.toString());
+        }
+        if (fromEx != null && isSaneAgainstBook(key, fromEx)) {
+            exchangeInfoCache.put(key, new CachedSymbolInfo(fromEx, System.currentTimeMillis()));
+            return fromEx;
+        }
+
+        // 3) fallback — derive из стакана
+        SymbolFilters fromBook = bookDerivedFiltersResolver.derive(key);
+        exchangeInfoCache.put(key, new CachedSymbolInfo(fromBook, System.currentTimeMillis()));
+        log.info("[{}] Using ORDERBOOK-derived filters: {}", key, fromBook);
+        return fromBook;
+    }
+
+    /** Согласованность фильтров со стаканом. */
+    private boolean isSaneAgainstBook(String symbol, SymbolFilters f) {
+        try {
+            NavigableMap<BigDecimal, BigDecimal> asks = orderBookService.asksSnapshot(symbol);
+            NavigableMap<BigDecimal, BigDecimal> bids = orderBookService.bidsSnapshot(symbol);
+            int total = Math.min(25, asks == null ? 0 : asks.size()) + Math.min(25, bids == null ? 0 : bids.size());
+            if (total == 0) return true; // нечем валидировать
+
+            BigDecimal tick = f.getTickSize();
+            if (tick == null || tick.signum() <= 0) return false;
+
+            int bad = 0;
+            bad += countModNotZero(asks == null ? null : asks.keySet(), tick, 25);
+            bad += countModNotZero(bids == null ? null : bids.keySet(), tick, 25);
+            boolean tickOk = bad <= Math.max(1, total / 10); // допускаем до 10% «грязных» уровней
+            if (!tickOk) {
+                log.warn("[{}] tick={} inconsistent with book (bad={}/{}).", symbol, tick, bad, total);
+                return false;
+            }
+
+            BigDecimal step = f.getStepSize();
+            if (step == null || step.signum() <= 0) return false;
+
+            bad = 0;
+            bad += countModNotZero(asks == null ? null : asks.values(), step, 25);
+            bad += countModNotZero(bids == null ? null : bids.values(), step, 25);
+            boolean stepOk = bad <= Math.max(1, total / 10);
+            if (!stepOk) {
+                log.warn("[{}] stepSize={} inconsistent with book (bad={}/{}).", symbol, step, bad, total);
+                return false;
+            }
+
+            // minNotional ≥ 0 — ок
+            return f.getMinNotional() != null && f.getMinNotional().signum() >= 0;
+        } catch (Exception ex) {
+            log.warn("[{}] sanity check failed: {}", symbol, ex.toString());
+            return false;
+        }
+    }
+
+    private static int countModNotZero(Collection<BigDecimal> vals, BigDecimal step, int limit) {
+        if (vals == null || vals.isEmpty()) return 0;
+        int bad = 0, i = 0;
+        for (BigDecimal v : vals) {
+            if (i++ >= limit) break;
+            if (!isAligned(v, step)) bad++;
+        }
+        return bad;
+    }
+
+    private static boolean isAligned(BigDecimal v, BigDecimal step) {
+        if (v == null || step == null || step.signum() == 0) return false;
+        int scale = Math.max(v.scale(), step.scale());
+        BigInteger vi = v.movePointRight(scale).toBigInteger();
+        BigInteger si = step.movePointRight(scale).toBigInteger();
+        if (si.signum() == 0) return false;
+        return vi.mod(si).signum() == 0;
     }
 
     public void placeLimitSellA(String symbol, BigDecimal price, BigDecimal qty, Long chatId, String clientId) {

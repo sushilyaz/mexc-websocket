@@ -117,7 +117,6 @@ public class OrderBookService implements MexcWsClient.Listener {
             log.debug("BookTicker parse error for {}: {}", s, e.toString());
         }
     }
-    // mexc/ws/market/OrderBookService.java
     public NavigableMap<BigDecimal, BigDecimal> asksSnapshot(String symbol) {
         LocalOrderBook ob = books.get(symbol.toUpperCase());
         return (ob == null) ? new TreeMap<>() : ob.copyAsks();

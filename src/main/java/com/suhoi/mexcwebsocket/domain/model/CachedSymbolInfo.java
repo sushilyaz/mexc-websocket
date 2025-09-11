@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 @Data
+@AllArgsConstructor
 public class CachedSymbolInfo {
     private SymbolFilters filters;
     private long loadedAt;
