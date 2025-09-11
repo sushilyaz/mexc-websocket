@@ -37,7 +37,7 @@ public class OrderBookService implements MexcWsClient.Listener {
     private final Map<String, Long> lastVersion = new ConcurrentHashMap<>();
     private static final int BOOK_CAP = 50;        // храним верхние 50 на сторону (или 10/20 — как нужно)
     private static final int PARTIAL_LEVELS = 20;  // partial для ресинка
-    private static final long BOOK_STALE_MS = 1500; // сколько считаем стакан «свежим»
+    private static final long BOOK_STALE_MS = 2000; // сколько считаем стакан «свежим»
 
     // логи ордербука
     private final Map<String, AtomicBoolean> dirty = new ConcurrentHashMap<>();

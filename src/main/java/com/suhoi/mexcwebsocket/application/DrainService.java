@@ -40,6 +40,7 @@ public class DrainService {
     private final OrderStateTracker tracker;
     private final ScheduledExecutorService drainScheduler;
     private static final long SELL_STATUS_TIMEOUT_MS = 3000;
+    private static final long GHOST_TTL_MS = 800;
 
     private final MexcWsFacade mexcWsFacade;
 
@@ -475,6 +476,13 @@ public class DrainService {
             return;
         }
 
+        long t0 = System.currentTimeMillis();
+        BigDecimal lastBuyPx = s.getPBuy(); // цена верхней ноги предыдущего цикла
+        while (System.currentTimeMillis() - t0 < GHOST_TTL_MS) {
+            BigDecimal bb = orderBooks.bestBid(s.getSymbol());
+            if (bb == null || lastBuyPx == null || bb.compareTo(lastBuyPx) != 0) break;
+            try { Thread.sleep(30); } catch (InterruptedException ignored) {}
+        }
         // хватает ли для следующего нижнего SELL[A] по minNotional?
         BigDecimal nextPSell = mexcWsFacade.getNearLowerSpreadPriceExcludingMine(
                 s.getSymbol(),
