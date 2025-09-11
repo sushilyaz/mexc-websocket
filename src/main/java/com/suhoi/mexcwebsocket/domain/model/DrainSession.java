@@ -41,6 +41,13 @@ public class DrainSession {
     public String buyOrderId;
     private BigDecimal bBaseBeforeSell = BigDecimal.ZERO;
 
+    // цель и прогресс перелива (в USDT)
+    private BigDecimal targetDrainUSDT;           // сколько хотим перелить всего
+    private BigDecimal drainedUSDT = BigDecimal.ZERO; // сколько уже перелили суммарно
+
+    // сколько A потратил на BUY на верхней кромке в текущем цикле
+    private BigDecimal lastSpentAUpper = BigDecimal.ZERO;
+
     public BigDecimal pSell;          // выставленная цена SELL (нижняя кромка)
     public BigDecimal pBuy;           // выставленная цена BUY  (верхняя кромка)
 
