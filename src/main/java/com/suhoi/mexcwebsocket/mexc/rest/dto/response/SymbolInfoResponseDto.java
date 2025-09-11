@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.util.List;
 
 @Data
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class SymbolInfoResponseDto {
     private String symbol;
     private String status;

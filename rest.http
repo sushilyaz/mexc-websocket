@@ -1,0 +1,15 @@
+### Текущие фильтры для одного символа
+GET https://api.mexc.com/api/v3/exchangeInfo?symbol=ANTUSDT
+Accept: application/json
+
+### (опционально) Все символы — полезно для сравнения/отладки
+GET https://api.mexc.com/api/v3/exchangeInfo
+Accept: application/json
+
+### (опционально) Быстрый L1 для сверки с фильтрами
+GET https://api.mexc.com/api/v3/ticker/bookTicker?symbol=ANTUSDT
+Accept: application/json
+
+### (опционально) 24h статистика — можно взять lastPrice как референс для процента
+GET https://api.mexc.com/api/v3/ticker/24hr?symbol=ANTUSDT
+Accept: application/json

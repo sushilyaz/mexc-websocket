@@ -34,7 +34,6 @@ public class MexcWsFacade {
         return (v == null) ? 0 : v.scale(); // не stripTrailingZeros — нам важна исходная точность
     }
 
-
     public BigDecimal getNearLowerSpreadPrice(String symbol) {
         final String s = symbol.toUpperCase();
 
@@ -51,8 +50,7 @@ public class MexcWsFacade {
         // 3) Фоллбэк, если нет bid
         if (bid == null || bid.signum() <= 0) {
             BigDecimal fb = MarketMath.normalizePrice(tick, tick);
-            log.info("[nearLower:{}] Fallback: bid={} tick={} qp={} -> {}",
-                    s, bid, tick, qp, fb);
+            log.info("[nearLower:{}] Fallback: bid={} tick={} qp={} -> {}", s, bid, tick, qp, fb);
             return fb;
         }
 
@@ -83,7 +81,6 @@ public class MexcWsFacade {
                 BigDecimal rawGuard = bid.add(spread.multiply(SPREAD_GUARD));
                 BigDecimal guardUp  = MarketMath.ceilToStep(rawGuard, tick);
 
-                // минимум — всегда хотя бы nextAboveBid
                 BigDecimal candidate = guardUp.max(nextAboveBid);
 
                 // держим внутри спреда, если это возможно
@@ -92,7 +89,6 @@ public class MexcWsFacade {
                     if (candidate.compareTo(askMinusTick) > 0) candidate = askMinusTick;
                     result = candidate;
                 } else {
-                    // спред уже меньше одного тика — остаёмся на nextAboveBid
                     result = nextAboveBid;
                 }
 
@@ -109,7 +105,6 @@ public class MexcWsFacade {
                         guardUp.stripTrailingZeros().toPlainString(),
                         result.stripTrailingZeros().toPlainString());
             } else {
-                // spread <= 0
                 log.info("[nearLower:{}] spread<=0 → nextAboveBid={}", s, nextAboveBid.stripTrailingZeros().toPlainString());
                 result = nextAboveBid;
             }
@@ -205,6 +200,20 @@ public class MexcWsFacade {
         return result.stripTrailingZeros();
     }
 
+    /** Достаём «моё» количество по цене с сравнением по значению (compareTo==0), чтобы игнорировать scale. */
+    private static BigDecimal mineAt(Map<BigDecimal, BigDecimal> mineMap, BigDecimal px) {
+        if (mineMap == null || px == null) return BigDecimal.ZERO;
+        BigDecimal byKey = mineMap.get(px); // часто null из-за scale
+        if (byKey != null) return byKey;
+
+        for (var e : mineMap.entrySet()) {
+            if (e.getKey() != null && e.getKey().compareTo(px) == 0) {
+                return e.getValue();
+            }
+        }
+        return BigDecimal.ZERO;
+    }
+
     private L1 computeL1ExcludingMine(String symbol,
                                       Map<BigDecimal, BigDecimal> myBids,
                                       Map<BigDecimal, BigDecimal> myAsks) {
@@ -215,7 +224,13 @@ public class MexcWsFacade {
         for (var e : asks.entrySet()) {
             BigDecimal px  = e.getKey();
             BigDecimal tot = e.getValue();
-            BigDecimal mine = (myAsks == null) ? BigDecimal.ZERO : myAsks.getOrDefault(px, BigDecimal.ZERO);
+            BigDecimal mine = mineAt(myAsks, px);    // <-- фикс: сравнение по compareTo()
+            if (mine.signum() == 0 && myAsks != null && myAsks.containsKey(px)) {
+                // обычный кейс (equals) — молчим
+            } else if (mine.signum() > 0 && (myAsks == null || !myAsks.containsKey(px))) {
+                log.debug("[computeL1ExcludingMine:{}] scale-mismatch на ask px={} — найден через compareTo(), но не через equals()",
+                        symbol, px.stripTrailingZeros().toPlainString());
+            }
             if (tot.subtract(mine).signum() > 0) { effAsk = px; break; }
         }
 
@@ -223,11 +238,14 @@ public class MexcWsFacade {
         for (var e : bids.entrySet()) { // bidsSnapshot уже в порядке best->worst
             BigDecimal px  = e.getKey();
             BigDecimal tot = e.getValue();
-            BigDecimal mine = (myBids == null) ? BigDecimal.ZERO : myBids.getOrDefault(px, BigDecimal.ZERO);
+            BigDecimal mine = mineAt(myBids, px);    // <-- фикс: сравнение по compareTo()
+            if (mine.signum() > 0 && (myBids == null || !myBids.containsKey(px))) {
+                log.debug("[computeL1ExcludingMine:{}] scale-mismatch на bid px={} — найден через compareTo(), но не через equals()",
+                        symbol, px.stripTrailingZeros().toPlainString());
+            }
             if (tot.subtract(mine).signum() > 0) { effBid = px; break; }
         }
 
         return new L1(effBid, effAsk, System.currentTimeMillis());
     }
 }
-

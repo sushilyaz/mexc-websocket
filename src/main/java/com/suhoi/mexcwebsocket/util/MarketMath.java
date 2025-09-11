@@ -15,25 +15,6 @@ public final class MarketMath {
         BigDecimal multiples = value.divide(step, 0, RoundingMode.DOWN);
         return multiples.multiply(step);
     }
-    public static BigDecimal clampInsideSpread(BigDecimal bid, BigDecimal ask, BigDecimal tick, BigDecimal pRaw) {
-        if (bid == null || ask == null || tick == null || tick.signum() <= 0) return pRaw;
-        if (ask.compareTo(bid) <= 0) {
-            // нет спреда: вернём ceil(bid) — как нижняя кромка при нулевом спреде
-            return alignPriceCeil(bid, tick);
-        }
-        BigDecimal nextAboveBid = floorToStep(bid, tick).add(tick);
-        BigDecimal askMinusTick = ceilToStep(ask, tick).subtract(tick); // ← ключевая правка
-
-        if (askMinusTick.compareTo(nextAboveBid) < 0) {
-            // внутри спреда нет валидного тика: ставим на нижнюю кромку
-            return nextAboveBid.stripTrailingZeros();
-        }
-
-        BigDecimal p = alignPriceCeil(pRaw, tick);
-        if (p.compareTo(nextAboveBid) < 0) p = nextAboveBid;
-        if (p.compareTo(askMinusTick) > 0) p = askMinusTick;
-        return p.stripTrailingZeros();
-    }
 
     /** ceil к шагу step: ближайшее кратное step, ≥ value. Удобно для SELL у нижней кромки. */
     public static BigDecimal ceilToStep(BigDecimal value, BigDecimal step) {
@@ -94,5 +75,72 @@ public final class MarketMath {
             }
         }
         return q.stripTrailingZeros();
+    }
+
+    // =========================
+    // Новые хелперы для клампа
+    // =========================
+
+    /**
+     * Кламп к статическому диапазону [minPrice, maxPrice] с округлением к тикам.
+     * Для SELL при поднятии к минимуму используем ceil (by tick), для BUY при опускании к максимуму — floor.
+     */
+    public static BigDecimal clampToStaticRange(BigDecimal rawPrice,
+                                                BigDecimal minPrice,
+                                                BigDecimal maxPrice,
+                                                BigDecimal tick,
+                                                boolean isSell) {
+        if (rawPrice == null) return null;
+        if (minPrice != null && maxPrice != null && minPrice.compareTo(maxPrice) > 0) {
+            // перестраховка
+            BigDecimal t = minPrice; minPrice = maxPrice; maxPrice = t;
+        }
+
+        BigDecimal p = rawPrice;
+        if (minPrice != null && p.compareTo(minPrice) < 0) {
+            p = isSell ? ceilToStep(minPrice, tick) : ceilToStep(minPrice, tick); // обеим сторонам лучше не опускаться ниже минимума
+        }
+        if (maxPrice != null && p.compareTo(maxPrice) > 0) {
+            p = isSell ? floorToStep(maxPrice, tick) : floorToStep(maxPrice, tick);
+        }
+        // финальная подгонка к сетке тика в сторону заявки
+        p = isSell ? ceilToStep(p, tick) : floorToStep(p, tick);
+        return p.stripTrailingZeros();
+    }
+
+    /**
+     * Кламп к процентному коридору вокруг референсной цены:
+     * [ref * multiplierDown, ref * multiplierUp].
+     * Для SELL — гарантируем p >= minAllowed (ceil к тику), для BUY — p <= maxAllowed (floor к тику).
+     */
+    public static BigDecimal clampToPercentBand(BigDecimal rawPrice,
+                                                BigDecimal refPrice,
+                                                BigDecimal multiplierDown,
+                                                BigDecimal multiplierUp,
+                                                BigDecimal tick,
+                                                boolean isSell) {
+        if (rawPrice == null || refPrice == null || refPrice.signum() <= 0) return rawPrice;
+        if (multiplierDown == null || multiplierDown.signum() <= 0) multiplierDown = BigDecimal.ONE;
+        if (multiplierUp == null || multiplierUp.signum() <= 0) multiplierUp = BigDecimal.ONE;
+
+        BigDecimal minAllowed = refPrice.multiply(multiplierDown);
+        BigDecimal maxAllowed = refPrice.multiply(multiplierUp);
+
+        // округляем границы так, чтобы точно быть внутри коридора
+        BigDecimal minAligned = ceilToStep(minAllowed, tick);
+        BigDecimal maxAligned = floorToStep(maxAllowed, tick);
+
+        BigDecimal p = rawPrice;
+
+        if (isSell) {
+            if (p.compareTo(minAligned) < 0) p = minAligned;
+            if (p.compareTo(maxAligned) > 0) p = maxAligned; // на всякий
+            p = ceilToStep(p, tick); // SELL — кверху
+        } else {
+            if (p.compareTo(maxAligned) > 0) p = maxAligned;
+            if (p.compareTo(minAligned) < 0) p = minAligned; // на всякий
+            p = floorToStep(p, tick); // BUY — вниз
+        }
+        return p.stripTrailingZeros();
     }
 }
