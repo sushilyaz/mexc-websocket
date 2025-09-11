@@ -42,7 +42,7 @@ public class MexcRestFacade {
     public SymbolFilters getSymbolFilters(String symbol) {
         String key = symbol.toUpperCase();
 
-        // 1) cache
+        // 0) cache (оставляем как было)
         CachedSymbolInfo cachedSymbolInfo = exchangeInfoCache.get(key);
         if (cachedSymbolInfo != null) {
             SymbolFilters filters = cachedSymbolInfo.getFilters();
@@ -50,24 +50,48 @@ public class MexcRestFacade {
                 return filters;
         }
 
-        // 2) exchangeInfo
-        SymbolFilters fromEx = null;
+        // 1) exchangeInfo -> частичные фильтры
+        SymbolFilters exPart = null;
         try {
-            fromEx = MexcMapper.mapToFilters(mexcRestClient.getSymbolInformation(key), symbol); // как и раньше
+            SymbolInfoResponseDto dto = mexcRestClient.getSymbolInformation(key);
+            exPart = MexcMapper.mapToFilters(dto, key);
         } catch (Exception ex) {
             log.warn("[{}] exchangeInfo failed: {}", key, ex.toString());
         }
-        if (fromEx != null && isSaneAgainstBook(key, fromEx)) {
-            exchangeInfoCache.put(key, new CachedSymbolInfo(fromEx, System.currentTimeMillis()));
-            return fromEx;
+
+        // 2) derive из стакана
+        SymbolFilters bookPart = null;
+        try {
+            bookPart = bookDerivedFiltersResolver.derive(key);
+        } catch (Exception ex) {
+            log.warn("[{}] book-derive failed: {}", key, ex.toString());
         }
 
-        // 3) fallback — derive из стакана
-        SymbolFilters fromBook = bookDerivedFiltersResolver.derive(key);
-        exchangeInfoCache.put(key, new CachedSymbolInfo(fromBook, System.currentTimeMillis()));
-        log.info("[{}] Using ORDERBOOK-derived filters: {}", key, fromBook);
-        return fromBook;
+        // 3) merge: exchangeInfo ⊕ orderbook
+        SymbolFilters merged = MexcMapper.mergeWithBook(exPart, bookPart, key);
+
+        // 4) sanity: если тик/шаг не согласованы со стаканом — заменим их книжными
+        if (!isSaneAgainstBook(key, merged)) {
+            if (bookPart != null) {
+                merged = MexcMapper.mergeWithBook(
+                        // сохраняем minQty/minNotional/quotePrecision из exPart, но тик/шаг — строго из книги
+                        new SymbolFilters(null, null,
+                                exPart != null ? exPart.getMinQty() : BigDecimal.ZERO,
+                                exPart != null ? exPart.getMinNotional() : merged.getMinNotional(),
+                                exPart != null ? exPart.getQuotePrecision() : merged.getQuotePrecision()
+                        ),
+                        bookPart,
+                        key
+                );
+            }
+        }
+
+        // 5) финал: кладём в кэш и отдаём
+        exchangeInfoCache.put(key, new CachedSymbolInfo(merged, System.currentTimeMillis()));
+        log.info("[{}] Filters -> {}", key, merged);
+        return merged;
     }
+
 
     /** Согласованность фильтров со стаканом. */
     private boolean isSaneAgainstBook(String symbol, SymbolFilters f) {

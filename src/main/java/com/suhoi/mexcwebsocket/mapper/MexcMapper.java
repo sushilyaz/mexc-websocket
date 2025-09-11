@@ -8,67 +8,74 @@ import java.math.BigDecimal;
 public class MexcMapper {
     private MexcMapper() {}
 
-    /** Преобразует ответ MEXC в твой SymbolFilters c аккуратными fallback-ами. */
+    /**
+     * Маппинг ТОЛЬКО того, что реально даёт /exchangeInfo:
+     * - quotePrecision
+     * - minQty (из baseSizePrecision)
+     * - minNotional (из quoteAmountPrecision, дефолт 1 для USDT-пар)
+     * tickSize/stepSize здесь НЕ задаём — их нужно деривировать из стакана.
+     */
     public static SymbolFilters mapToFilters(SymbolInfoResponseDto dto, String symbol) {
         if (dto == null) {
-            return defaultsFor(symbol);
+            // Вернём только то, что можно безопасно дефолтить: minNotional.
+            return new SymbolFilters(
+                    null,                     // tickSize -> из стакана
+                    null,                     // stepSize -> из стакана
+                    BigDecimal.ZERO,          // minQty неизвестен -> 0
+                    defaultMinNotional(symbol),
+                    defaultQuotePrecision(symbol) // чисто на случай, если вообще ничего не пришло
+            );
         }
 
-        // 1) quotePrecision
+        // quotePrecision (форматная точность котируемой)
         Integer quotePrecision = firstNonNull(dto.getQuotePrecision(), dto.getQuoteAssetPrecision());
         if (quotePrecision == null) {
-            quotePrecision = symbol != null && symbol.endsWith("USDT") ? 6 : 8; // как у тебя раньше
+            quotePrecision = defaultQuotePrecision(symbol);
         }
 
-        // 2) вытащим фильтры если есть
-        SymbolInfoResponseDto.Filter priceFilter = getFilter(dto, "PRICE_FILTER");
-        SymbolInfoResponseDto.Filter lotFilter   = getFilter(dto, "LOT_SIZE");
-        SymbolInfoResponseDto.Filter notional    = firstNonNull(
-                getFilter(dto, "MIN_NOTIONAL"),
-                getFilter(dto, "NOTIONAL")
-        );
-
-        // 3) собираем значения
-        BigDecimal tickSize = toBD(priceFilter != null ? priceFilter.getTickSize() : null);
-        BigDecimal stepSize = toBD(lotFilter   != null ? lotFilter.getStepSize()   : null);
-        BigDecimal minQty   = toBD(lotFilter   != null ? lotFilter.getMinQty()     : null);
-        BigDecimal minNotional = toBD(notional != null ? notional.getMinNotional() : null);
-
-        // 4) fallback-логика
-        if (tickSize == null) {
-            // «красивее», чем fixed 1e-8: если знаем точность котируемой, возьмём 10^-precision
-            tickSize = quotePrecision != null
-                    ? BigDecimal.ONE.movePointLeft(quotePrecision)
-                    : new BigDecimal("0.00000001");
-        }
-        if (stepSize == null) {
-            // у MEXC часто есть baseSizePrecision = реальный шаг количества (строкой)
-            stepSize = toBD(dto.getBaseSizePrecision());
-        }
-        if (stepSize == null) stepSize = BigDecimal.ONE;
-
-        // в старом коде default был 0 — сохраним поведение
+        // minQty — из baseSizePrecision (док описывает как "min order quantity")
+        BigDecimal minQty = toBD(dto.getBaseSizePrecision());
         if (minQty == null) minQty = BigDecimal.ZERO;
 
-        if (minNotional == null) minNotional = BigDecimal.ZERO;
+        // minNotional — из quoteAmountPrecision ("min order amount")
+        BigDecimal minNotional = toBD(dto.getQuoteAmountPrecision());
+        if (minNotional == null) {
+            minNotional = defaultMinNotional(symbol);
+        }
 
-        SymbolFilters out = new SymbolFilters(tickSize, stepSize, minQty, minNotional, quotePrecision);
+        // tickSize/stepSize из exchangeInfo часто отсутствуют (filters=[]), здесь их не трогаем
+        return new SymbolFilters(
+                null,            // tickSize -> из стакана
+                null,            // stepSize -> из стакана
+                minQty,
+                minNotional,
+                quotePrecision
+        );
+    }
 
-        return out;
+    /** Слить (exchangeInfo ⊕ orderbook): exchangeInfo даёт minQty/minNotional/quotePrecision, стакан — tick/step. */
+    public static SymbolFilters mergeWithBook(SymbolFilters ex, SymbolFilters book, String symbol) {
+        if (ex == null) ex = new SymbolFilters(null, null, BigDecimal.ZERO, defaultMinNotional(symbol), defaultQuotePrecision(symbol));
+        if (book == null) book = new SymbolFilters(null, null, BigDecimal.ZERO, defaultMinNotional(symbol), ex.getQuotePrecision());
+
+        BigDecimal tick = nonZero(ex.getTickSize()) ? ex.getTickSize() : book.getTickSize();
+        BigDecimal step = nonZero(ex.getStepSize()) ? ex.getStepSize() : book.getStepSize();
+
+        BigDecimal minQty = nonZero(ex.getMinQty()) ? ex.getMinQty() : (nonZero(book.getMinQty()) ? book.getMinQty() : BigDecimal.ZERO);
+        BigDecimal minNotional = nonZero(ex.getMinNotional()) ? ex.getMinNotional()
+                : (nonZero(book.getMinNotional()) ? book.getMinNotional() : defaultMinNotional(symbol));
+
+        Integer qp = (ex.getQuotePrecision() != null) ? ex.getQuotePrecision()
+                : (book.getQuotePrecision() != null) ? book.getQuotePrecision()
+                : (tick != null ? Math.max(0, tick.stripTrailingZeros().scale()) : defaultQuotePrecision(symbol));
+
+        return new SymbolFilters(tick, step, minQty, minNotional, qp);
     }
 
     // ==== helpers ====
 
-    private static SymbolInfoResponseDto.Filter getFilter(SymbolInfoResponseDto dto, String type) {
-        if (dto.getFilters() == null) return null;
-        for (var f : dto.getFilters()) {
-            if (type.equals(f.getFilterType())) return f;
-        }
-        return null;
-    }
-
     private static BigDecimal toBD(String s) {
-        return (s == null || s.isBlank()) ? null : new BigDecimal(s);
+        return (s == null || s.isBlank() || "0".equals(s)) ? null : new BigDecimal(s);
     }
 
     @SafeVarargs
@@ -77,15 +84,16 @@ public class MexcMapper {
         return null;
     }
 
-    private static SymbolFilters defaultsFor(String symbol) {
-        return new SymbolFilters(
-                new BigDecimal("0.00000001"),
-                BigDecimal.ONE,
-                BigDecimal.ZERO,
-                BigDecimal.ZERO,
-                symbol != null && symbol.endsWith("USDT") ? 6 : 8
-        );
+    private static boolean nonZero(BigDecimal x) {
+        return x != null && x.signum() > 0;
     }
 
+    private static BigDecimal defaultMinNotional(String symbol) {
+        return (symbol != null && symbol.endsWith("USDT")) ? BigDecimal.ONE : BigDecimal.ZERO;
+    }
 
+    private static int defaultQuotePrecision(String symbol) {
+        // На практике USDT-пары обычно 6–8; пусть будет 6 для USDT, иначе 8 — чисто запасной вариант
+        return (symbol != null && symbol.endsWith("USDT")) ? 6 : 8;
+    }
 }

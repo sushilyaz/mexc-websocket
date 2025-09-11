@@ -120,6 +120,91 @@ public class MexcWsFacade {
 
         return result.stripTrailingZeros();
     }
+    /** Нижняя кромка спреда, исключая наши лимитные заявки (зеркально nearUpperX). */
+    public BigDecimal getNearLowerSpreadPriceExcludingMine(String symbol,
+                                                           Map<BigDecimal, BigDecimal> myBids,
+                                                           Map<BigDecimal, BigDecimal> myAsks) {
+        final String s = symbol.toUpperCase();
+
+        // 1) Фильтры
+        SymbolFilters f = mexcRestFacade.getSymbolFilters(s);
+        BigDecimal tick = f.getTickSize();
+        Integer qp = f.getQuotePrecision();
+
+        // 2) L1 без своих объёмов
+        L1 l1 = computeL1ExcludingMine(s, myBids, myAsks);
+        BigDecimal bid = (l1 != null) ? l1.getBid() : null;
+        BigDecimal ask = (l1 != null) ? l1.getAsk() : null;
+
+        // 3) Фоллбэк, если нет bid
+        if (bid == null || bid.signum() <= 0) {
+            BigDecimal fb = MarketMath.normalizePrice(tick, tick);
+            log.info("[nearLowerX:{}] Fallback: bid={} tick={} qp={} -> {}", s, bid, tick, qp, fb);
+            return fb;
+        }
+
+        // 4) Тик: как в nearUpperX — проверяем делимость L1 и при необходимости берём масштаб L1
+        if (tick == null || tick.signum() <= 0 || notMultiple(bid, tick) || (ask != null && notMultiple(ask, tick))) {
+            int scale = Math.max(safeScale(bid), safeScale(ask));
+            BigDecimal tickByL1 = (scale > 0) ? BigDecimal.ONE.movePointLeft(scale) : tick;
+            log.warn("[nearLowerX:{}] tick from filters {} (qp={}) не делит L1 (bid={} ask={}) -> override tick={}",
+                    s,
+                    (tick == null ? "null" : tick.toPlainString()),
+                    qp,
+                    (bid == null ? "null" : bid.toPlainString()),
+                    (ask == null ? "null" : ask.toPlainString()),
+                    (tickByL1 == null ? "null" : tickByL1.toPlainString()));
+            tick = tickByL1;
+        }
+
+        // 5) База снизу: nextAboveBid = floor(bid) + tick
+        BigDecimal alignedBid   = MarketMath.floorToStep(bid, tick);
+        BigDecimal nextAboveBid = alignedBid.add(tick);
+        BigDecimal result = nextAboveBid;
+
+        // 6) SPREAD_GUARD (зеркально nearUpperX)
+        if (ask != null && ask.signum() > 0) {
+            BigDecimal spread = ask.subtract(bid);
+            if (spread.signum() > 0) {
+                BigDecimal rawGuard = bid.add(spread.multiply(SPREAD_GUARD));
+                BigDecimal guardUp  = MarketMath.ceilToStep(rawGuard, tick);
+
+                // Верхняя рамка внутри спреда: (ceil(ask) - tick)
+                BigDecimal askMinusTick = MarketMath.ceilToStep(ask, tick).subtract(tick);
+
+                // Кандидат держим между [nextAboveBid, askMinusTick]
+                BigDecimal candidate = guardUp.max(nextAboveBid);
+                if (askMinusTick.compareTo(nextAboveBid) >= 0) {
+                    if (candidate.compareTo(askMinusTick) > 0) candidate = askMinusTick;
+                    result = candidate;
+                } else {
+                    // спред уже < 1 тика — остаёмся на nextAboveBid
+                    result = nextAboveBid;
+                }
+
+                log.info("[nearLowerX:{}] bid={} ask={} spread={} guard={} tick={} qp={} | alignedBid={} nextAboveBid={} rawGuard={} guardUp={} -> result={}",
+                        s,
+                        (bid==null?"null":bid.stripTrailingZeros().toPlainString()),
+                        ask.stripTrailingZeros().toPlainString(),
+                        spread.stripTrailingZeros().toPlainString(),
+                        SPREAD_GUARD.stripTrailingZeros().toPlainString(),
+                        tick.stripTrailingZeros().toPlainString(), qp,
+                        alignedBid.stripTrailingZeros().toPlainString(),
+                        nextAboveBid.stripTrailingZeros().toPlainString(),
+                        rawGuard.stripTrailingZeros().toPlainString(),
+                        guardUp.stripTrailingZeros().toPlainString(),
+                        result.stripTrailingZeros().toPlainString());
+            } else {
+                log.info("[nearLowerX:{}] spread<=0 → nextAboveBid={}", s, nextAboveBid.stripTrailingZeros().toPlainString());
+                result = nextAboveBid;
+            }
+        } else {
+            log.info("[nearLowerX:{}] NO_ASK → nextAboveBid={}", s, nextAboveBid.stripTrailingZeros().toPlainString());
+            result = nextAboveBid;
+        }
+
+        return result.stripTrailingZeros();
+    }
 
     /** Верхняя кромка спреда, исключая наши лимитные заявки (зеркально nearLower). */
     public BigDecimal getNearUpperSpreadPriceExcludingMine(String symbol,

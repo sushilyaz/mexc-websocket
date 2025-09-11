@@ -4,6 +4,7 @@ package com.suhoi.mexcwebsocket.mexc.rest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.suhoi.mexcwebsocket.mexc.rest.dto.response.DepthResponseDto;
+import com.suhoi.mexcwebsocket.mexc.rest.dto.response.ExchangeInfoResponseDto;
 import com.suhoi.mexcwebsocket.mexc.rest.dto.response.SymbolInfoResponseDto;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.web.client.RestTemplateBuilder;
@@ -48,12 +49,19 @@ public class MexcRestClient {
     }
 
     public SymbolInfoResponseDto getSymbolInformation(String symbol) {
-        String uri = UriComponentsBuilder.fromPath(API_PREFIX + EXCHANGE_INFO_ENDPOINT)
+        String uri = UriComponentsBuilder
+                .fromPath(API_PREFIX + EXCHANGE_INFO_ENDPOINT) // напр. "/api/v3/exchangeInfo"
                 .queryParam("symbol", symbol.toUpperCase())
                 .build()
                 .toUriString();
-        return rest.getForObject(uri, SymbolInfoResponseDto.class);
+
+        ExchangeInfoResponseDto resp = rest.getForObject(uri, ExchangeInfoResponseDto.class);
+        if (resp == null || resp.getSymbols() == null || resp.getSymbols().isEmpty()) {
+            throw new IllegalStateException("exchangeInfo: пустой ответ по символу " + symbol);
+        }
+        return resp.getSymbols().getFirst();
     }
+
 
     public String newOrder(String symbol, String side, String type, String timeInForce, String qty, String price, String clientId,
                            String apiKey, String secretKey) {

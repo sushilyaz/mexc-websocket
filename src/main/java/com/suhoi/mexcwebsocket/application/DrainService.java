@@ -18,6 +18,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -160,8 +161,17 @@ public class DrainService {
         final String symbol = s.getSymbol();
         final SymbolFilters f = mexcRestFacade.getSymbolFilters(symbol);
 
+        // карты своих заявок в рамках текущего цикла
+        final Map<BigDecimal, BigDecimal> myAsks = new ConcurrentHashMap<>();
+        final Map<BigDecimal, BigDecimal> myBids = new ConcurrentHashMap<>();
+
         // === нижняя кромка: SELL[A] ===
-        BigDecimal pSell = mexcWsFacade.getNearLowerSpreadPrice(symbol);
+        // исключаем свои потенциальные BID'ы (если вдруг где-то висят из-за гонок/лагов)
+        BigDecimal pSell = mexcWsFacade.getNearLowerSpreadPriceExcludingMine(
+                symbol,
+                myBids,                        // исключаем свои бид-объёмы
+                Collections.emptyMap()         // свои аски тут не важны
+        );
         BigDecimal minQtyForSell = MarketMath.minQtyForNotional(pSell, f.getStepSize(), f.getMinNotional());
 
         if (s.getQtyA() == null || s.getQtyA().compareTo(minQtyForSell) < 0) {
@@ -174,7 +184,6 @@ public class DrainService {
         }
 
         log.info("[SELL_PLANNED] {} nearSell={} planQtyA={}", symbol, fmt(pSell), fmt(s.getQtyA()));
-        final Map<BigDecimal, BigDecimal> myAsks = new ConcurrentHashMap<>();
 
         String sellClientId = UUID.randomUUID().toString().replace("-", "");
         s.setSellOrderId(sellClientId);
@@ -278,8 +287,8 @@ public class DrainService {
                 try {
                     BigDecimal pBuyUpper = mexcWsFacade.getNearUpperSpreadPriceExcludingMine(
                             symbol,
-                            java.util.Collections.emptyMap(),  // myBids
-                            myAsks                              // исключаем наш SELL[A]
+                            Collections.emptyMap(),  // myBids (пока нет активных)
+                            myAsks                   // исключаем наш SELL[A]
                     );
                     s.setPBuy(pBuyUpper);
                     log.info("[BUY_UPPER_PLANNED/X] {} nearBuy={} (исключая наш SELL[A] @ {})",
@@ -300,6 +309,10 @@ public class DrainService {
                     var subAUpperRef = new AtomicReference<OrderEventBus.Subscription>();
                     OrderEventBus.Subscription subAUpper = orderEventBus.subscribe(evA -> {
                         if (evA instanceof OrderEvent.OrderAccepted acc) {
+                            // наш BID[A] теперь реально в книге — фиксируем в myBids
+                            myBids.clear();
+                            myBids.put(s.getPBuy(), qtyUpper);
+
                             // сразу встречная SELL[B] IOC вниз в нашу BUY[A]
                             String sellBBelowClientId = UUID.randomUUID().toString().replace("-", "");
                             var subSellBRef = new AtomicReference<OrderEventBus.Subscription>();
@@ -364,6 +377,9 @@ public class DrainService {
                                     fA.avgPrice().stripTrailingZeros(),
                                     fA.cumulativeQuote().stripTrailingZeros());
 
+                            // BID[A] ушёл из книги — чистим
+                            myBids.clear();
+
                             // токены A на следующий цикл
                             s.setQtyA(fA.cumulativeQty());
 
@@ -386,17 +402,18 @@ public class DrainService {
                             if (oldA != null) oldA.close();
 
                             // решить — продолжаем или стоп
-                            continueOrFinish(chatId, s, f);
+                            continueOrFinish(chatId, s, f, myBids);
 
                         } else if (evA instanceof OrderEvent.OrderCanceled cA) {
+                            // отмена верхней ноги — смысла продолжать нет
+                            myBids.clear();
                             log.warn("❗ {} BUY[A] canceled (cum={})", symbol, fmt(cA.cumulativeQty()));
                             OrderEventBus.Subscription oldA = subAUpperRef.getAndSet(null);
                             if (oldA != null) oldA.close();
-
-                            // отмена верхней ноги — смысла продолжать нет
                             s.autoPause(DrainSession.AutoPauseReason.PARTIAL_MISMATCH, "A BUY@upper canceled");
 
                         } else if (evA instanceof OrderEvent.OrderRejected rA) {
+                            myBids.clear();
                             s.autoPause(DrainSession.AutoPauseReason.UNKNOWN, "A BUY rejected: " + rA.reason());
                             OrderEventBus.Subscription oldA = subAUpperRef.getAndSet(null);
                             if (oldA != null) oldA.close();
@@ -449,7 +466,7 @@ public class DrainService {
      * Решение о продолжении: цель достигнута? достаточно ли объёма для следующего цикла?
      * Если всё ок — сразу запускаем следующий цикл.
      */
-    private void continueOrFinish(Long chatId, DrainSession s, SymbolFilters f) {
+    private void continueOrFinish(Long chatId, DrainSession s, SymbolFilters f, Map<BigDecimal, BigDecimal> myBids) {
         // цель достигнута?
         if (nvl(s.getDrainedUSDT()).compareTo(nvl(s.getTargetDrainUSDT())) >= 0) {
             s.autoPause(DrainSession.AutoPauseReason.MANUAL,
@@ -459,7 +476,11 @@ public class DrainService {
         }
 
         // хватает ли для следующего нижнего SELL[A] по minNotional?
-        BigDecimal nextPSell = mexcWsFacade.getNearLowerSpreadPrice(s.getSymbol());
+        BigDecimal nextPSell = mexcWsFacade.getNearLowerSpreadPriceExcludingMine(
+                s.getSymbol(),
+                (myBids == null ? Collections.emptyMap() : myBids),
+                Collections.emptyMap()
+        );
         BigDecimal minQtyNextSell = MarketMath.minQtyForNotional(nextPSell, f.getStepSize(), f.getMinNotional());
         if (s.getQtyA() == null || s.getQtyA().compareTo(minQtyNextSell) < 0) {
             s.autoPause(DrainSession.AutoPauseReason.INSUFFICIENT_BALANCE,
@@ -472,6 +493,11 @@ public class DrainService {
         // всё ок — следующий цикл
         log.info("🔄 CONTINUE: next pSell={} with qtyA={}", fmt(nextPSell), fmt(s.getQtyA()));
         executeCycle(chatId, s);
+    }
+
+    // старый делегат — на всякий случай
+    private void continueOrFinish(Long chatId, DrainSession s, SymbolFilters f) {
+        continueOrFinish(chatId, s, f, Collections.emptyMap());
     }
 
     private static BigDecimal nvl(BigDecimal x) {

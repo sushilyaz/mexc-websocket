@@ -15,25 +15,6 @@ public final class MarketMath {
         BigDecimal multiples = value.divide(step, 0, RoundingMode.DOWN);
         return multiples.multiply(step);
     }
-    public static BigDecimal clampInsideSpread(BigDecimal bid, BigDecimal ask, BigDecimal tick, BigDecimal pRaw) {
-        if (bid == null || ask == null || tick == null || tick.signum() <= 0) return pRaw;
-        if (ask.compareTo(bid) <= 0) {
-            // нет спреда: вернём ceil(bid) — как нижняя кромка при нулевом спреде
-            return alignPriceCeil(bid, tick);
-        }
-        BigDecimal nextAboveBid = floorToStep(bid, tick).add(tick);
-        BigDecimal askMinusTick = ceilToStep(ask, tick).subtract(tick); // ← ключевая правка
-
-        if (askMinusTick.compareTo(nextAboveBid) < 0) {
-            // внутри спреда нет валидного тика: ставим на нижнюю кромку
-            return nextAboveBid.stripTrailingZeros();
-        }
-
-        BigDecimal p = alignPriceCeil(pRaw, tick);
-        if (p.compareTo(nextAboveBid) < 0) p = nextAboveBid;
-        if (p.compareTo(askMinusTick) > 0) p = askMinusTick;
-        return p.stripTrailingZeros();
-    }
 
     /** ceil к шагу step: ближайшее кратное step, ≥ value. Удобно для SELL у нижней кромки. */
     public static BigDecimal ceilToStep(BigDecimal value, BigDecimal step) {
