@@ -26,6 +26,8 @@ dependencies {
     implementation 'com.google.protobuf:protobuf-java:3.25.3'
     // Telegram long polling (стабильная ветка 6.9.x)
     implementation 'org.telegram:telegrambots:6.9.7.1'
+    implementation 'me.paulschwarz:spring-dotenv:4.0.0'
+
     compileOnly 'org.projectlombok:lombok:1.18.38'
     annotationProcessor 'org.projectlombok:lombok:1.18.38'
 

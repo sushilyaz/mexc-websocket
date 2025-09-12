@@ -9,9 +9,6 @@ mexc:
     maxSubscriptionsPerConn: 30
   user:
     enabled: false   # ⬅️ выключили глобальный user-WS
-#    apiKey:        # ⬅️ эти поля убери
-#    secret:
-#    keepAliveMinutes: 30
 
 logging:
   level:
