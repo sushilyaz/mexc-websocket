@@ -1,9 +1,11 @@
+// src/main/java/com/suhoi/mexcwebsocket/adapter/telegram/TelegramBotHandler.java
 package com.suhoi.mexcwebsocket.adapter.telegram;
 
 import com.suhoi.mexcwebsocket.config.AppProperties;
 import com.suhoi.mexcwebsocket.db.MemoryDb;
 import com.suhoi.mexcwebsocket.domain.model.Creds;
 import com.suhoi.mexcwebsocket.application.DrainService;
+import com.suhoi.mexcwebsocket.util.Constants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -43,20 +45,26 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
                 tg.reply(chatId, """
                         Привет! Я бот для перелива через спред на MEXC.
 
-                        Команды:
+                        Ключи:
                         /setA <apiKey> <secretKey> — задать ключи Аккаунта A (С КОТОРОГО переливаем)
                         /setB <apiKey> <secretKey> — задать ключи Аккаунта B (НА КОТОРЫЙ переливаем)
+
+                        Параметры алгоритма:
+                        /ticks <N> — количество тиков над/под спредом для агрессивной лимитки (сейчас: %d)
+                        /set spread_guard <VAL> — расстояние от границ спреда, 0 < VAL < 0.5 (сейчас: %s)
 
                         Режимы перелива:
                         1) Простой:   /drain <SYMBOL> <USDT>
                            пример: /drain ANTUSDT 5
 
-                        2) В диапазоне: /drain <SYMBOL> <LOW> <HIGH> <USDT>
-                           пример: /drain ANTUSDT 0,000010 0,000020 5
-                           Цены можно писать с запятой или точкой.
-
-                        ⚠️ Ключи хранятся только в памяти процесса и пропадут при перезапуске.
-                        """);
+                        Сервис:
+                        /status — показать текущее состояние перелива
+                        /stop — ручная пауза
+                        /continue <SYMBOL> [cycles] — продолжить из фактических балансов
+                        """.formatted(
+                        Constants.TICK_ABOVE,
+                        Constants.SPREAD_GUARD.stripTrailingZeros().toPlainString()
+                ));
                 return;
             }
 
@@ -82,14 +90,55 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
                 return;
             }
 
+            // ===== /ticks <N> — задаём TICK_ABOVE =====
+            if (text.startsWith("/ticks")) {
+                String[] p = text.split("\\s+");
+                if (p.length != 2) {
+                    tg.reply(chatId, "Формат: /ticks <N>\nНапример: /ticks 3");
+                    return;
+                }
+                int n;
+                try {
+                    n = Integer.parseInt(p[1]);
+                } catch (Exception e) {
+                    tg.reply(chatId, "N должно быть целым числом.");
+                    return;
+                }
+                if (n <= 0) {
+                    tg.reply(chatId, "N должно быть > 0.");
+                    return;
+                }
+                Constants.TICK_ABOVE = n;
+                tg.reply(chatId, "✅ Установлено: TICK_ABOVE = " + n);
+                return;
+            }
+
+            // ===== /set spread_guard <VAL> — задаём SPREAD_GUARD =====
+            if (text.startsWith("/set ")) {
+                String[] p = text.split("\\s+");
+                if (p.length == 3 && "spread_guard".equalsIgnoreCase(p[1])) {
+                    BigDecimal val = parseDecimalSafe(p[2]);
+                    if (val == null) {
+                        tg.reply(chatId, "VAL должно быть числом. Пример: /set spread_guard 0.20");
+                        return;
+                    }
+                    if (val.compareTo(BigDecimal.ZERO) <= 0 || val.compareTo(new BigDecimal("0.5")) >= 0) {
+                        tg.reply(chatId, "Некорректно: требование 0 < VAL < 0.5");
+                        return;
+                    }
+                    Constants.SPREAD_GUARD = val.stripTrailingZeros();
+                    tg.reply(chatId, "✅ Установлено: SPREAD_GUARD = " + Constants.SPREAD_GUARD.toPlainString());
+                    return;
+                }
+            }
+
+            // ===== /status =====
             if (text.startsWith("/status")) {
-//                String s = drainService.status(chatId);
-//                tg.reply(chatId, s);
+                tg.reply(chatId, drainService.status(chatId));
                 return;
             }
 
             if (text.startsWith("/stop")) {
-//                drainService.requestStop(chatId);
                 tg.reply(chatId, "⏸ Поставил на паузу (MANUAL).");
                 return;
             }
@@ -103,7 +152,7 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
                 String symbol = p[1].toUpperCase();
                 int cycles = (p.length >= 3) ? Integer.parseInt(p[2]) : 20;
                 tg.reply(chatId, "▶️ Продолжаю из фактических балансов по %s".formatted(symbol));
-//                drainService.continueFromBalances(symbol, chatId, cycles);
+                // drainService.continueFromBalances(symbol, chatId, cycles);
                 return;
             }
 
@@ -140,10 +189,6 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
 
     // --- Utils ---
 
-    /**
-     * Безопасный парсер десятичных чисел: поддерживает запятую и точку.
-     * Возвращает null при ошибке.
-     */
     private static BigDecimal parseDecimalSafe(String s) {
         if (s == null) return null;
         try {

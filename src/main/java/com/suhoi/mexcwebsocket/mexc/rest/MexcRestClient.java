@@ -3,6 +3,7 @@ package com.suhoi.mexcwebsocket.mexc.rest;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.suhoi.mexcwebsocket.mexc.rest.dto.response.AccountInfoResponseDto;
 import com.suhoi.mexcwebsocket.mexc.rest.dto.response.DepthResponseDto;
 import com.suhoi.mexcwebsocket.mexc.rest.dto.response.ExchangeInfoResponseDto;
 import com.suhoi.mexcwebsocket.mexc.rest.dto.response.SymbolInfoResponseDto;
@@ -30,6 +31,7 @@ public class MexcRestClient {
     private static final String ORDER_ENDPOINT = "/order";
     private static final String TIME_ENDPOINT = "/time";
     private static final String EXCHANGE_INFO_ENDPOINT = "/exchangeInfo";
+    private static final String ACCOUNT_INFO_ENDPOINT = "/account";
     private final RestTemplate rest;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -62,6 +64,23 @@ public class MexcRestClient {
         return resp.getSymbols().getFirst();
     }
 
+
+    public AccountInfoResponseDto getAccountInfo(String apiKey, String secretKey) {
+        Map<String, String> p = new LinkedHashMap<>();
+        JsonNode resp = signedRequest("GET", ACCOUNT_INFO_ENDPOINT, p, apiKey, secretKey);
+
+        try {
+            AccountInfoResponseDto dto = objectMapper.treeToValue(resp, AccountInfoResponseDto.class);
+            if (dto == null) {
+                throw new IllegalStateException("account: пустой ответ");
+            }
+            return dto;
+        } catch (Exception e) {
+            // В лог положим «сырой» ответ, чтобы понимать, что пришло
+            log.error("Не удалось распарсить /account: {}", resp);
+            throw new RuntimeException("Failed to parse account info: " + e.getMessage(), e);
+        }
+    }
 
     public String newOrder(String symbol, String side, String type, String timeInForce, String qty, String price, String clientId,
                            String apiKey, String secretKey) {

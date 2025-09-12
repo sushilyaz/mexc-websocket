@@ -1,13 +1,10 @@
 package com.suhoi.mexcwebsocket.mexc.rest;
 
-import com.suhoi.mexcwebsocket.db.Cache;
 import com.suhoi.mexcwebsocket.db.MemoryDb;
-import com.suhoi.mexcwebsocket.domain.model.CachedSymbolInfo;
-import com.suhoi.mexcwebsocket.domain.model.Creds;
-import com.suhoi.mexcwebsocket.domain.model.L1;
-import com.suhoi.mexcwebsocket.domain.model.SymbolFilters;
+import com.suhoi.mexcwebsocket.domain.model.*;
 import com.suhoi.mexcwebsocket.infra.OrderEventBus;
 import com.suhoi.mexcwebsocket.mapper.MexcMapper;
+import com.suhoi.mexcwebsocket.mexc.rest.dto.response.AccountInfoResponseDto;
 import com.suhoi.mexcwebsocket.mexc.rest.dto.response.SymbolInfoResponseDto;
 import com.suhoi.mexcwebsocket.mexc.ws.market.BookDerivedFiltersResolver;
 import com.suhoi.mexcwebsocket.mexc.ws.market.OrderBookService;
@@ -23,6 +20,9 @@ import java.util.Collection;
 import java.util.NavigableMap;
 
 import static com.suhoi.mexcwebsocket.db.Cache.exchangeInfoCache;
+import static com.suhoi.mexcwebsocket.util.Constants.TICK_ABOVE;
+import static com.suhoi.mexcwebsocket.util.Constants.startBalances;
+import static com.suhoi.mexcwebsocket.util.FormatHelpers.fmt;
 
 @Component
 @RequiredArgsConstructor
@@ -31,13 +31,80 @@ public class MexcRestFacade {
 
     private final MexcRestClient mexcRestClient;
     public static final long EXCHANGE_INFO_TTL_MS = 60_000L;
-    private static final int TICK_ABOVE = 5;
     private final OrderBookService orderBookService;
     private final OrderEventBus orderEventBus;
     private final BookDerivedFiltersResolver bookDerivedFiltersResolver;
     // комиссия тейкера 0.05% (для BUY в USDT-парах комиссия в USDT)
     public static final BigDecimal TAKER_FEE_B = new BigDecimal("0.0005");
     // на сколько тиков поднять лимитную цену BUY(B) над pSell (0 или 1 обычно достаточно)
+
+    public void captureStartBalanceAccount(String symbol, Long chatId) {
+
+        AccountInfoResponseDto accountInfoA = mexcRestClient.getAccountInfo(MemoryDb.getAccountA(chatId).getApiKey(), MemoryDb.getAccountA(chatId).getSecret());
+        BigDecimal usdtAvailableA = accountInfoA.getBalances().stream()
+                .filter(b -> "USDT".equalsIgnoreCase(b.getAsset()))
+                .findFirst()
+                .map(b -> {
+                    // В доке есть поле "available"; если его нет — fallback на free - locked
+                    BigDecimal available = b.getAvailable();
+                    if (available != null) return available;
+                    BigDecimal free = b.getFree() != null ? b.getFree() : BigDecimal.ZERO;
+                    BigDecimal locked = b.getLocked() != null ? b.getLocked() : BigDecimal.ZERO;
+                    return free.subtract(locked);
+                })
+                .orElse(BigDecimal.ZERO);
+        String base = mexcRestClient.getSymbolInformation(symbol).getBaseAsset();
+
+        BigDecimal symbolAvailableA = accountInfoA.getBalances().stream()
+                .filter(b -> base.equalsIgnoreCase(b.getAsset()))
+                .findFirst()
+                .map(b -> {
+                    BigDecimal available = b.getAvailable();
+                    if (available != null) return available;
+                    BigDecimal free = b.getFree() != null ? b.getFree() : BigDecimal.ZERO;
+                    BigDecimal locked = b.getLocked() != null ? b.getLocked() : BigDecimal.ZERO;
+                    return free.subtract(locked);
+                })
+                .orElse(BigDecimal.ZERO);
+
+        AccountInfoResponseDto accountInfoB = mexcRestClient.getAccountInfo(MemoryDb.getAccountB(chatId).getApiKey(), MemoryDb.getAccountB(chatId).getSecret());
+        BigDecimal usdtAvailableB = accountInfoB.getBalances().stream()
+                .filter(b -> "USDT".equalsIgnoreCase(b.getAsset()))
+                .findFirst()
+                .map(b -> {
+                    // В доке есть поле "available"; если его нет — fallback на free - locked
+                    BigDecimal available = b.getAvailable();
+                    if (available != null) return available;
+                    BigDecimal free = b.getFree() != null ? b.getFree() : BigDecimal.ZERO;
+                    BigDecimal locked = b.getLocked() != null ? b.getLocked() : BigDecimal.ZERO;
+                    return free.subtract(locked);
+                })
+                .orElse(BigDecimal.ZERO);
+
+        BigDecimal symbolAvailableB = accountInfoB.getBalances().stream()
+                .filter(b -> base.equalsIgnoreCase(b.getAsset()))
+                .findFirst()
+                .map(b -> {
+                    BigDecimal available = b.getAvailable();
+                    if (available != null) return available;
+                    BigDecimal free = b.getFree() != null ? b.getFree() : BigDecimal.ZERO;
+                    BigDecimal locked = b.getLocked() != null ? b.getLocked() : BigDecimal.ZERO;
+                    return free.subtract(locked);
+                })
+                .orElse(BigDecimal.ZERO);
+
+        startBalances.put(chatId, new BalanceSnapshot(
+                usdtAvailableA, usdtAvailableB,
+                symbolAvailableA, symbolAvailableB,
+                base)
+        );
+        log.info("📌 START_BALANCES chatId={} A[USDT={}, BASE={}]; B[USDT={}, BASE={}] base={}",
+                chatId,
+                fmt(usdtAvailableA), fmt(symbolAvailableA),
+                fmt(usdtAvailableB), fmt(symbolAvailableB),
+                base);
+
+    }
 
     public SymbolFilters getSymbolFilters(String symbol) {
         String key = symbol.toUpperCase();
@@ -93,7 +160,9 @@ public class MexcRestFacade {
     }
 
 
-    /** Согласованность фильтров со стаканом. */
+    /**
+     * Согласованность фильтров со стаканом.
+     */
     private boolean isSaneAgainstBook(String symbol, SymbolFilters f) {
         try {
             NavigableMap<BigDecimal, BigDecimal> asks = orderBookService.asksSnapshot(symbol);
@@ -240,7 +309,6 @@ public class MexcRestFacade {
     }
 
 
-
     public String limitBuyAboveSpreadA(String symbol, BigDecimal usdtAmount, Long chatId, String clientId) {
         Creds creds = MemoryDb.getAccountA(chatId);
         if (creds == null) throw new IllegalArgumentException("Нет ключей для accountA (chatId=" + chatId + ")");
@@ -285,10 +353,10 @@ public class MexcRestFacade {
             return null;
         }
 
-        // отправляем ордер
         return mexcRestClient.newOrder(
-                symbol, "BUY", "LIMIT","IOC", qty.toPlainString(), price.toPlainString(),
+                symbol, "BUY", "LIMIT", "IOC", qty.toPlainString(), price.toPlainString(),
                 clientId, creds.getApiKey(), creds.getSecret());
+
     }
 
     public String limitBuyAboveSpreadB(String symbol,
@@ -320,7 +388,7 @@ public class MexcRestFacade {
 
         // это только для логов/контроля: сколько USDT теоретически нужно и с комиссией
         BigDecimal quoteAtOurAsk = pSell.multiply(q); // исполняться будем по pSell (цена ордера A), а не по pCross
-        BigDecimal quoteWithFee   = quoteAtOurAsk.multiply(BigDecimal.ONE.add(TAKER_FEE_B));
+        BigDecimal quoteWithFee = quoteAtOurAsk.multiply(BigDecimal.ONE.add(TAKER_FEE_B));
         // округлим только для лога (отправляем quantity/price, не quoteOrderQty)
         int qp = Math.max(0, f.getQuotePrecision());
         BigDecimal qLog = quoteAtOurAsk.setScale(qp, RoundingMode.DOWN).stripTrailingZeros();
@@ -341,6 +409,7 @@ public class MexcRestFacade {
                 creds.getApiKey(), creds.getSecret()
         );
     }
+
     public void placeLimitBuyAAt(String symbol,
                                  BigDecimal price,
                                  BigDecimal qty,
@@ -602,6 +671,7 @@ public class MexcRestFacade {
         return px != null && step != null && step.signum() > 0
                 && px.remainder(step).compareTo(BigDecimal.ZERO) != 0;
     }
+
     private static int safeScale(BigDecimal v) {
         return v == null ? 0 : v.scale();
     }
