@@ -24,4 +24,15 @@ public class MemoryDb {
 
     public static DrainSession getSession(Long chatId) { return sessions.get(chatId); }
     public static void setSession(Long chatId, DrainSession s) { sessions.put(chatId, s); }
+
+    // MemoryDb.java
+    public static void withSession(Long chatId, java.util.function.Consumer<com.suhoi.mexcwebsocket.domain.model.DrainSession> fn) {
+        var s = getSession(chatId);
+        if (s == null) return;
+        synchronized (s) {
+            fn.accept(s);
+            // если нужно, можно продублировать setSession(chatId, s);
+        }
+    }
+
 }

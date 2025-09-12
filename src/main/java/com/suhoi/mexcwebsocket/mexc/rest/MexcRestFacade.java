@@ -31,7 +31,7 @@ public class MexcRestFacade {
 
     private final MexcRestClient mexcRestClient;
     public static final long EXCHANGE_INFO_TTL_MS = 60_000L;
-    private static final int TICK_ABOVE = 10;
+    private static final int TICK_ABOVE = 5;
     private final OrderBookService orderBookService;
     private final OrderEventBus orderEventBus;
     private final BookDerivedFiltersResolver bookDerivedFiltersResolver;

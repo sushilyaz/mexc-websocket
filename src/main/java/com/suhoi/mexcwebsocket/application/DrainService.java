@@ -40,7 +40,8 @@ public class DrainService {
     private final OrderStateTracker tracker;
     private final ScheduledExecutorService drainScheduler;
     private static final long SELL_STATUS_TIMEOUT_MS = 3000;
-    private static final long GHOST_TTL_MS = 800;
+    private static final long GHOST_TTL_MS = 1500;
+    private final BalanceControllerWs balanceControllerWs;
 
     private final MexcWsFacade mexcWsFacade;
 
@@ -66,7 +67,7 @@ public class DrainService {
         DrainSession s = new DrainSession();
         s.setSymbol(symbol);
         s.setState(DrainSession.State.IDLE);
-        s.setTargetDrainUSDT(usdtAmount);           // цель перелива (B -> A)
+        s.setTargetDrainUSDT(usdtAmount);           // цель перелива (A -> B)
         s.setDrainedUSDT(BigDecimal.ZERO);          // прогресс
         s.setCycleIndex(0);
         MemoryDb.setSession(chatId, s);
@@ -92,6 +93,7 @@ public class DrainService {
                         s.getQtyA().stripTrailingZeros(),
                         f.avgPrice().stripTrailingZeros(),
                         f.cumulativeQuote().stripTrailingZeros());
+                verifyLater(s, BalanceControllerWs.Phase.AFTER_A_MKT_BUY);
 
                 var old = subRef.getAndSet(null);
                 if (old != null) old.close();
@@ -154,8 +156,8 @@ public class DrainService {
 
     /**
      * Один полный цикл:
-     *  A: SELL (нижняя кромка) → B: BUY IOC в него
-     *  A: BUY (верхняя кромка, исключая мои заявки) → B: SELL IOC в него
+     * A: SELL (нижняя кромка) → B: BUY IOC в него
+     * A: BUY (верхняя кромка, исключая мои заявки) → B: SELL IOC в него
      * После FILLED верхнего BUY[A]: учитываем дельту перелива, решаем продолжать/стоп.
      */
     private BigDecimal executeCycle(Long chatId, DrainSession s) {
@@ -173,7 +175,8 @@ public class DrainService {
                 myBids,                        // исключаем свои бид-объёмы
                 Collections.emptyMap()         // свои аски тут не важны
         );
-        BigDecimal minQtyForSell = MarketMath.minQtyForNotional(pSell, f.getStepSize(), f.getMinNotional());
+        BigDecimal effMinNotional = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
+        BigDecimal minQtyForSell = MarketMath.minQtyForNotional(pSell, f.getStepSize(), effMinNotional);
 
         if (s.getQtyA() == null || s.getQtyA().compareTo(minQtyForSell) < 0) {
             return autoPauseAndZero(
@@ -190,6 +193,7 @@ public class DrainService {
         s.setSellOrderId(sellClientId);
         s.setPSell(pSell);
         s.setState(DrainSession.State.A_SELL_PLACED);
+        verifyLater(s, BalanceControllerWs.Phase.AFTER_A_SELL_PLACED);
 
         var subRef = new AtomicReference<OrderEventBus.Subscription>();
         OrderEventBus.Subscription sub = orderEventBus.subscribe(ev -> {
@@ -218,6 +222,7 @@ public class DrainService {
                                 fb.avgPrice().stripTrailingZeros(),
                                 fb.cumulativeQuote().stripTrailingZeros());
                         s.setLastSpentB(fb.cumulativeQuote());
+
                         OrderEventBus.Subscription oldB = subBRef.getAndSet(null);
                         if (oldB != null) oldB.close();
 
@@ -281,6 +286,9 @@ public class DrainService {
 
                 s.setState(DrainSession.State.A_SELL_FILLED);
                 s.setLastCummA(fEv.cumulativeQuote()); // USDT пришло на A
+                s.setLastFilledLowerQty(fEv.cumulativeQty());
+                verifyLater(s, BalanceControllerWs.Phase.AFTER_LOWER_FILLED);
+
                 OrderEventBus.Subscription old = subRef.getAndSet(null);
                 if (old != null) old.close();
 
@@ -295,10 +303,11 @@ public class DrainService {
                     log.info("[BUY_UPPER_PLANNED/X] {} nearBuy={} (исключая наш SELL[A] @ {})",
                             symbol, fmt(pBuyUpper), fmt(s.getPSell()));
 
-                    BigDecimal qtyUpper = MarketMath.normalizeQty(s.getQtyA(), f);
+                    BigDecimal qtyUpper = MarketMath.normalizeQty(nvl(s.getLastFilledLowerQty()), f);
 
-                    BigDecimal effMinNotional = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
-                    BigDecimal minQtyNeedUpper = MarketMath.minQtyForNotional(pBuyUpper, f.getStepSize(), effMinNotional);
+                    BigDecimal finalEffMinNotional = effMinNotional;
+                    finalEffMinNotional = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
+                    BigDecimal minQtyNeedUpper = MarketMath.minQtyForNotional(pBuyUpper, f.getStepSize(), finalEffMinNotional);
                     if (qtyUpper.compareTo(minQtyNeedUpper) < 0 || qtyUpper.compareTo(f.getMinQty()) < 0) {
                         s.autoPause(DrainSession.AutoPauseReason.INSUFFICIENT_BALANCE,
                                 "qtyUpper < minNotional для BUY[A] @ " + fmt(pBuyUpper) +
@@ -313,6 +322,7 @@ public class DrainService {
                             // наш BID[A] теперь реально в книге — фиксируем в myBids
                             myBids.clear();
                             myBids.put(s.getPBuy(), qtyUpper);
+                            verifyLater(s, BalanceControllerWs.Phase.AFTER_A_BUY_PLACED);
 
                             // сразу встречная SELL[B] IOC вниз в нашу BUY[A]
                             String sellBBelowClientId = UUID.randomUUID().toString().replace("-", "");
@@ -383,11 +393,14 @@ public class DrainService {
 
                             // токены A на следующий цикл
                             s.setQtyA(fA.cumulativeQty());
+                            s.setLastSpentAUpper(fA.cumulativeQuote());
+                            s.setLastFilledUpperQty(fA.cumulativeQty());
+                            verifyLater(s, BalanceControllerWs.Phase.AFTER_UPPER_FILLED);
 
                             // дельта перелива за цикл: (пришло на A при нижнем SELL) - (ушло с A при верхнем BUY)
                             BigDecimal receivedALower = nvl(s.getLastCummA());
-                            BigDecimal spentAUpper   = nvl(fA.cumulativeQuote());
-                            BigDecimal drainedDelta  = receivedALower.subtract(spentAUpper);
+                            BigDecimal spentAUpper = nvl(fA.cumulativeQuote());
+                            BigDecimal drainedDelta = spentAUpper.subtract(receivedALower); // >=0
 
                             if (drainedDelta.signum() > 0) {
                                 s.setDrainedUSDT(nvl(s.getDrainedUSDT()).add(drainedDelta));
@@ -453,7 +466,7 @@ public class DrainService {
 
         drainScheduler.schedule(() -> {
             if (subRef.get() != null && s.getState() != DrainSession.State.A_SELL_FILLED && s.getState() != DrainSession.State.AUTO_PAUSE) {
-                s.autoPause(DrainSession.AutoPauseReason.TIMEOUT, "No WS status for A BUY");
+                s.autoPause(DrainSession.AutoPauseReason.TIMEOUT, "No WS status for A SELL");
                 var old = subRef.getAndSet(null);
                 if (old != null) old.close();
             }
@@ -477,11 +490,15 @@ public class DrainService {
         }
 
         long t0 = System.currentTimeMillis();
-        BigDecimal lastBuyPx = s.getPBuy(); // цена верхней ноги предыдущего цикла
+        BigDecimal lastBuyPx = s.getPBuy(); // мы раньше ставили BID[A] по этой цене
         while (System.currentTimeMillis() - t0 < GHOST_TTL_MS) {
             BigDecimal bb = orderBooks.bestBid(s.getSymbol());
             if (bb == null || lastBuyPx == null || bb.compareTo(lastBuyPx) != 0) break;
-            try { Thread.sleep(30); } catch (InterruptedException ignored) {}
+            try {
+                Thread.sleep(30);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
         }
         // хватает ли для следующего нижнего SELL[A] по minNotional?
         BigDecimal nextPSell = mexcWsFacade.getNearLowerSpreadPriceExcludingMine(
@@ -489,7 +506,9 @@ public class DrainService {
                 (myBids == null ? Collections.emptyMap() : myBids),
                 Collections.emptyMap()
         );
-        BigDecimal minQtyNextSell = MarketMath.minQtyForNotional(nextPSell, f.getStepSize(), f.getMinNotional());
+        BigDecimal effMinNotional = MarketMath.resolveMinNotional(s.getSymbol(), f.getMinNotional());
+        BigDecimal minQtyNextSell = MarketMath.minQtyForNotional(nextPSell, f.getStepSize(), effMinNotional);
+
         if (s.getQtyA() == null || s.getQtyA().compareTo(minQtyNextSell) < 0) {
             s.autoPause(DrainSession.AutoPauseReason.INSUFFICIENT_BALANCE,
                     "next qtyA < minNotional для SELL @ " + fmt(nextPSell) +
@@ -522,6 +541,12 @@ public class DrainService {
         s.autoPause(reason, details);
         log.warn("⏸ AUTO_PAUSE@{} -> reason={} | details={} | {}", whereTag, reason, details, snapshot(s));
         return BigDecimal.ZERO;
+    }
+
+    private void verifyLater(DrainSession s, BalanceControllerWs.Phase ph) {
+        // filtros нужны для epsilon/step — безопасно взять их каждый раз из кеша фасада
+        var f = mexcRestFacade.getSymbolFilters(s.getSymbol());
+        drainScheduler.schedule(() -> balanceControllerWs.verify(s, ph, f), 120, TimeUnit.MILLISECONDS);
     }
 
     private String snapshot(DrainSession s) {

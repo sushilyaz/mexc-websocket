@@ -20,12 +20,14 @@ public class DrainSession {
     }
 
     public enum AutoPauseReason {
+        BALANCE_MISMATCH,     // факты ≠ ожидания
+        BALANCE_STALE,        // не удалось получить/подтвердить балансы
         MANUAL,
-        FRONT_RUN,             // вклинивание ММ
-        TIMEOUT,               // таймаут ожидания FILLED
-        PARTIAL_MISMATCH,      // факты/ожидания не сошлись
-        SPREAD_TOO_THIN,       // спред слишком мал
-        INSUFFICIENT_BALANCE,  // не хватает средств для шага
+        FRONT_RUN,            // вклинивание ММ
+        TIMEOUT,              // таймаут ожидания FILLED
+        PARTIAL_MISMATCH,     // факты/ожидания не сошлись
+        SPREAD_TOO_THIN,      // спред слишком мал
+        INSUFFICIENT_BALANCE, // не хватает средств для шага
         UNKNOWN
     }
 
@@ -42,8 +44,8 @@ public class DrainSession {
     private BigDecimal bBaseBeforeSell = BigDecimal.ZERO;
 
     // цель и прогресс перелива (в USDT)
-    private BigDecimal targetDrainUSDT;           // сколько хотим перелить всего
-    private BigDecimal drainedUSDT = BigDecimal.ZERO; // сколько уже перелили суммарно
+    private BigDecimal targetDrainUSDT;              // сколько хотим перелить всего
+    private BigDecimal drainedUSDT = BigDecimal.ZERO;// сколько уже перелили суммарно
 
     // сколько A потратил на BUY на верхней кромке в текущем цикле
     private BigDecimal lastSpentAUpper = BigDecimal.ZERO;
@@ -53,6 +55,7 @@ public class DrainSession {
 
     public BigDecimal lastSpentB;     // сколько USDT реально списали с B при MARKET BUY
     public BigDecimal lastCummA;      // сколько USDT реально пришло на A при SELL
+
     /**
      * Сколько планируем продать с аккаунта B в текущем цикле —
      * всегда равно фактическому количеству в лимитной заявке BUY на аккаунте A.
@@ -68,6 +71,23 @@ public class DrainSession {
     public long tCreated = System.currentTimeMillis();
     public long tLastUpdate = System.currentTimeMillis();
 
+    // ===== WS-балансы (живые значения free/frozen) =====
+    private BigDecimal aBaseFree   = BigDecimal.ZERO, aBaseLocked   = BigDecimal.ZERO;
+    private BigDecimal aUsdtFree   = BigDecimal.ZERO, aUsdtLocked   = BigDecimal.ZERO;
+    private BigDecimal bBaseFree   = BigDecimal.ZERO, bBaseLocked   = BigDecimal.ZERO;
+    private BigDecimal bUsdtFree   = BigDecimal.ZERO, bUsdtLocked   = BigDecimal.ZERO;
+    private long aAccTs = 0L, bAccTs = 0L; // времена последнего аккаунт-ивента
+
+    // Для точной сверки FILLED-количеств
+    private BigDecimal lastFilledLowerQty = BigDecimal.ZERO; // qty SELL[A]
+    private BigDecimal lastFilledUpperQty = BigDecimal.ZERO; // qty BUY[A]
+
+    // Удобные суммы
+    public BigDecimal aBaseTotal() { return nz(aBaseFree).add(nz(aBaseLocked)); }
+    public BigDecimal aUsdtTotal() { return nz(aUsdtFree).add(nz(aUsdtLocked)); }
+    public BigDecimal bBaseTotal() { return nz(bBaseFree).add(nz(bBaseLocked)); }
+    public BigDecimal bUsdtTotal() { return nz(bUsdtFree).add(nz(bUsdtLocked)); }
+
     public void setState(State s) {
         this.state = s;
         this.tLastUpdate = System.currentTimeMillis();
@@ -79,4 +99,6 @@ public class DrainSession {
         this.reasonDetails = details;
         this.tLastUpdate = System.currentTimeMillis();
     }
+
+    private static BigDecimal nz(BigDecimal x) { return x == null ? BigDecimal.ZERO : x; }
 }

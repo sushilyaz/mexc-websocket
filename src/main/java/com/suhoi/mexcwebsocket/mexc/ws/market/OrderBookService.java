@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
+
 import java.math.BigDecimal;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -30,9 +31,13 @@ public class OrderBookService implements MexcWsClient.Listener {
 
     private final MexcWsClient ws;
     private final MexcRestClient rest;
-    /** symbol -> локальный стакан */
+    /**
+     * symbol -> локальный стакан
+     */
     private final Map<String, LocalOrderBook> books = new ConcurrentHashMap<>();
-    /** symbol -> подписан ли уже на каналы */
+    /**
+     * symbol -> подписан ли уже на каналы
+     */
     private final Map<String, Boolean> subscribed = new ConcurrentHashMap<>();
     private final Map<String, Long> lastVersion = new ConcurrentHashMap<>();
     private static final int BOOK_CAP = 50;        // храним верхние 50 на сторону (или 10/20 — как нужно)
@@ -54,7 +59,9 @@ public class OrderBookService implements MexcWsClient.Listener {
         ws.addListener(this);
     }
 
-    /** Начать отслеживать символ: snapshot + diff. Идемпотентно. */
+    /**
+     * Начать отслеживать символ: snapshot + diff. Идемпотентно.
+     */
     public void startTracking(String symbol) {
         final String s = symbol.toUpperCase();
         LocalOrderBook ob = books.computeIfAbsent(s, LocalOrderBook::new);
@@ -91,7 +98,9 @@ public class OrderBookService implements MexcWsClient.Listener {
         }
     }
 
-    /** Снимок топ-N уровней для отладки/статуса. */
+    /**
+     * Снимок топ-N уровней для отладки/статуса.
+     */
     public String debugTopN(String symbol, int n) {
         LocalOrderBook ob = books.get(symbol.toUpperCase());
         return (ob == null) ? "No book for " + symbol : ob.topN(n);
@@ -106,10 +115,11 @@ public class OrderBookService implements MexcWsClient.Listener {
         if (ob == null) return;
 
         try {
+            long now = System.currentTimeMillis();
             ob.applyBookTicker(
                     new BigDecimal(bt.getBidPrice()), new BigDecimal(bt.getBidQuantity()),
                     new BigDecimal(bt.getAskPrice()), new BigDecimal(bt.getAskQuantity()),
-                    ts
+                    now
             );
             ensureLoggerStarted(s);
             markDirty(s);
@@ -117,13 +127,15 @@ public class OrderBookService implements MexcWsClient.Listener {
             log.debug("BookTicker parse error for {}: {}", s, e.toString());
         }
     }
+
     public NavigableMap<BigDecimal, BigDecimal> asksSnapshot(String symbol) {
         LocalOrderBook ob = books.get(symbol.toUpperCase());
         return (ob == null) ? new TreeMap<>() : ob.copyAsks();
     }
+
     public NavigableMap<BigDecimal, BigDecimal> bidsSnapshot(String symbol) {
         LocalOrderBook ob = books.get(symbol.toUpperCase());
-        return (ob == null) ? new TreeMap<>((a, b)->b.compareTo(a)) : ob.copyBids();
+        return (ob == null) ? new TreeMap<>((a, b) -> b.compareTo(a)) : ob.copyBids();
     }
 
     @Override
@@ -133,7 +145,7 @@ public class OrderBookService implements MexcWsClient.Listener {
         if (ob == null) return;
 
         Long from = parseLongSafe(d.getFromVersion());
-        Long to   = parseLongSafe(d.getToVersion());
+        Long to = parseLongSafe(d.getToVersion());
         Long prev = lastVersion.get(s);
 
         if (prev != null && from != null && !from.equals(prev) && !from.equals(prev + 1)) {
@@ -154,7 +166,7 @@ public class OrderBookService implements MexcWsClient.Listener {
         if (to != null) lastVersion.put(s, to);
         else if (from != null) lastVersion.put(s, from);
 
-        ob.setLastUpdateTs(ts);
+        ob.setLastUpdateTs(System.currentTimeMillis());
         ob.trim(BOOK_CAP);
         markDirty(s);
         ensureLoggerStarted(s);
@@ -178,7 +190,7 @@ public class OrderBookService implements MexcWsClient.Listener {
         Long v = parseLongSafe(depth.getVersion());
         if (v != null) lastVersion.put(s, v);
 
-        ob.setLastUpdateTs(ts);
+        ob.setLastUpdateTs(System.currentTimeMillis());
         ob.trim(BOOK_CAP);
         markDirty(s);
     }
@@ -209,15 +221,18 @@ public class OrderBookService implements MexcWsClient.Listener {
         }
 
         if (v != null) lastVersion.put(s, v); // если v нет — не трогаем lastVersion, полагаемся на aggre.depth/partial
-        ob.setLastUpdateTs(ts);
+        ob.setLastUpdateTs(System.currentTimeMillis());
         ob.trim(BOOK_CAP);
         markDirty(s);
         ensureLoggerStarted(s);
     }
 
     private static Long parseLongSafe(String v) {
-        try { return (v == null || v.isEmpty()) ? null : Long.parseLong(v); }
-        catch (Exception e) { return null; }
+        try {
+            return (v == null || v.isEmpty()) ? null : Long.parseLong(v);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
 
@@ -238,11 +253,13 @@ public class OrderBookService implements MexcWsClient.Listener {
                             log.info("📊 {} L2 (top {})\n{}", symbol, LOG_TOP_N, ob.topN(LOG_TOP_N));
                         }
                     }
-                } catch (Throwable ignore) {}
+                } catch (Throwable ignore) {
+                }
             }, LOG_PERIOD_MS, LOG_PERIOD_MS, TimeUnit.MILLISECONDS);
             return new AtomicBoolean(false);
         });
     }
+
     private void resyncFromRest(String s) {
         try {
             var snap = rest.getDepthSnapshot(s, 100);
@@ -263,19 +280,25 @@ public class OrderBookService implements MexcWsClient.Listener {
         }
     }
 
-    /** Снимок L1 для symbol (или null, если стакана нет). */
+    /**
+     * Снимок L1 для symbol (или null, если стакана нет).
+     */
     public L1 getSnapshotL1(String symbol) {
         LocalOrderBook ob = books.get(symbol.toUpperCase());
         return (ob == null) ? null : ob.getSnapshotL1();
     }
 
-    /** Лучшая ask-цена или null. */
+    /**
+     * Лучшая ask-цена или null.
+     */
     public BigDecimal bestAsk(String symbol) {
         LocalOrderBook ob = books.get(symbol.toUpperCase());
         return (ob == null) ? null : ob.bestAskPx();
     }
 
-    /** Лучшая bid-цена или null. */
+    /**
+     * Лучшая bid-цена или null.
+     */
     public BigDecimal bestBid(String symbol) {
         LocalOrderBook ob = books.get(symbol.toUpperCase());
         return (ob == null) ? null : ob.bestBidPx();
