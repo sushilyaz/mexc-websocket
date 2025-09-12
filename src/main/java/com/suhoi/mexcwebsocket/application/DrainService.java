@@ -171,7 +171,7 @@ public class DrainService {
      */
     private BigDecimal executeCycle(Long chatId, DrainSession s) {
         if (stopped(chatId, s)) {
-            log.info("⏹ executeCycle: stopped, skip");
+            log.warn("⏹ executeCycle: stopped (state={}, flag={})", s.getState(), MemoryDb.getFlag(chatId).get());
             return BigDecimal.ZERO;
         }
         final String symbol = s.getSymbol();
@@ -485,6 +485,7 @@ public class DrainService {
     }
     // === Принудительное продолжение после ручного выравнивания состояний ===
     public void continueFromBalances(String symbol, Long chatId) {
+
         if (symbol == null || symbol.isBlank()) {
             telegram.reply(chatId, "❌ /continue: не указан символ");
             return;
@@ -503,11 +504,11 @@ public class DrainService {
 
         MemoryDb.withSession(chatId, s -> {
             // можно продолжать только из автопаузы
-            if (s.getState() != DrainSession.State.AUTO_PAUSE) {
-                err.set("❌ /continue: допускается только из состояния AUTO_PAUSE");
+            if (s.getState() != DrainSession.State.AUTO_PAUSE || MemoryDb.getFlag(chatId).get()) {
+                err.set("❌ /continue: допускается только из состояния AUTO_PAUSE или после ручной паузы");
                 return;
             }
-
+            MemoryDb.getFlag(chatId).set(true);
             // если символ в сессии пуст либо отличается — переключим и запустим L2
             if (s.getSymbol() == null || !s.getSymbol().equalsIgnoreCase(symFinal)) {
                 s.setSymbol(symFinal);
@@ -694,8 +695,18 @@ public class DrainService {
             log.info("⛔ STOP (minNotional): {}", snapshot(s));
             return;
         }
+        DrainSession fresh = MemoryDb.getSession(chatId);
 
-        // всё ок — следующий цикл
+        boolean stopRequested = fresh == null
+                || fresh.getState() == DrainSession.State.AUTO_PAUSE
+                || !MemoryDb.getFlag(chatId).get();
+        if (stopRequested) {
+            log.info("⏹ stop requested before next cycle (state={}, flag={}) — skip",
+                    fresh == null ? null : fresh.getState(),
+                    MemoryDb.getFlag(chatId).get());
+            return;
+        }
+
         log.info("🔄 CONTINUE: next pSell={} with qtyA={}", fmt(nextPSell), fmt(s.getQtyA()));
         executeCycle(chatId, s);
     }
