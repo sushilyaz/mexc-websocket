@@ -53,6 +53,7 @@ public class DrainService {
     public void startDrain(String symbol, BigDecimal usdtAmount, Long chatId) {
         Creds credsA = MemoryDb.getAccountA(chatId);
         Creds credsB = MemoryDb.getAccountB(chatId);
+        MemoryDb.getFlag(chatId).set(true);   // <— ВКЛЮЧАЕМ «running»
 
         log.info("🚀 START_DRAIN chatId={} symbol='{}' amount={} USDT", chatId, symbol, fmt(usdtAmount));
 
@@ -169,6 +170,10 @@ public class DrainService {
      * После FILLED верхнего BUY[A]: учитываем дельту перелива, решаем продолжать/стоп.
      */
     private BigDecimal executeCycle(Long chatId, DrainSession s) {
+        if (stopped(chatId, s)) {
+            log.info("⏹ executeCycle: stopped, skip");
+            return BigDecimal.ZERO;
+        }
         final String symbol = s.getSymbol();
         final SymbolFilters f = mexcRestFacade.getSymbolFilters(symbol);
 
@@ -478,6 +483,121 @@ public class DrainService {
         mexcRestFacade.placeLimitSellA(s.getSymbol(), pSell, s.getQtyA(), chatId, sellClientId);
         return null;
     }
+    // === Принудительное продолжение после ручного выравнивания состояний ===
+    public void continueFromBalances(String symbol, Long chatId) {
+        if (symbol == null || symbol.isBlank()) {
+            telegram.reply(chatId, "❌ /continue: не указан символ");
+            return;
+        }
+        symbol = symbol.toUpperCase();
+
+        DrainSession cur = MemoryDb.getSession(chatId);
+        if (cur == null) {
+            telegram.reply(chatId, "❌ /continue: активная сессия не найдена");
+            return;
+        }
+
+        // внутри withSession — атомарно читаем/меняем поля
+        final String symFinal = symbol;
+        final AtomicReference<String> err = new AtomicReference<>(null);
+
+        MemoryDb.withSession(chatId, s -> {
+            // можно продолжать только из автопаузы
+            if (s.getState() != DrainSession.State.AUTO_PAUSE) {
+                err.set("❌ /continue: допускается только из состояния AUTO_PAUSE");
+                return;
+            }
+
+            // если символ в сессии пуст либо отличается — переключим и запустим L2
+            if (s.getSymbol() == null || !s.getSymbol().equalsIgnoreCase(symFinal)) {
+                s.setSymbol(symFinal);
+                orderBooks.startTracking(symFinal);
+                log.info("🧱 L2 initialized for {}", symFinal);
+            }
+
+            final String base = baseAsset(s.getSymbol());
+            final SymbolFilters f = mexcRestFacade.getSymbolFilters(s.getSymbol());
+
+            // Фактические остатки по WS
+            BigDecimal aFreeBase = s.getABaseFree() == null ? BigDecimal.ZERO : s.getABaseFree();
+            BigDecimal bBaseTot  = s.bBaseTotal();
+
+            // B не должен владеть base (допустим только пыль << шагу)
+            BigDecimal dust = f.getStepSize(); // допускаем пыль меньше одного шага
+            if (bBaseTot != null && bBaseTot.compareTo(dust) > 0) {
+                err.set("❌ /continue: сначала доведи B."+base+" до нуля (сейчас: " + fmt(bBaseTot) + ")");
+                return;
+            }
+
+            // Цена нижней кромки и требование по minNotional
+            BigDecimal pSell = mexcWsFacade.getNearLowerSpreadPriceExcludingMine(
+                    s.getSymbol(),
+                    Collections.emptyMap(),
+                    Collections.emptyMap()
+            );
+            BigDecimal effMinNotional = MarketMath.resolveMinNotional(s.getSymbol(), f.getMinNotional());
+            BigDecimal minQtyForSell  = MarketMath.minQtyForNotional(pSell, f.getStepSize(), effMinNotional);
+
+            if (aFreeBase == null || aFreeBase.compareTo(minQtyForSell) < 0) {
+                err.set(("❌ /continue: на A недостаточно %s для следующего SELL @ %s. Нужно ≥ %s, есть %s")
+                        .formatted(base, fmt(pSell), fmt(minQtyForSell), fmt(aFreeBase)));
+                return;
+            }
+
+            // Берём весь свободный base на A, нормализуем под шаг
+            BigDecimal qtyA = MarketMath.normalizeQty(aFreeBase, f);
+            if (qtyA.compareTo(minQtyForSell) < 0) {
+                err.set(("❌ /continue: после нормализации под шаг меньше минимума. Нужно ≥ %s, есть %s")
+                        .formatted(fmt(minQtyForSell), fmt(qtyA)));
+                return;
+            }
+
+            // Готовим сессию к продолжению
+            s.setQtyA(qtyA);
+            s.setReason(null);
+            s.setReasonDetails(null);
+            s.setState(DrainSession.State.IDLE);
+            s.setPSell(null);
+            s.setPBuy(null);
+
+            log.info("▶️ CONTINUE prepared: symbol={} base={} qtyA={} (minQtyForSell={})",
+                    s.getSymbol(), base, fmt(qtyA), fmt(minQtyForSell));
+        });
+
+        if (err.get() != null) {
+            telegram.reply(chatId, err.get());
+            return;
+        }
+
+        // Вне критической секции — запускаем следующий цикл
+        DrainSession sNow = MemoryDb.getSession(chatId);
+        if (sNow == null) {
+            telegram.reply(chatId, "❌ /continue: сессия потеряна");
+            return;
+        }
+
+        telegram.reply(chatId, "▶️ Продолжаю из фактического остатка на A: qtyA=" +
+                fmt(sNow.getQtyA()) + " " + baseAsset(sNow.getSymbol()));
+        executeCycle(chatId, sNow);
+    }
+
+    // === Ручная остановка (немедленная автопауза MANUAL) ===
+    public void manualStop(Long chatId) {
+        DrainSession s = MemoryDb.getSession(chatId);
+        if (s == null) {
+            telegram.reply(chatId, "ℹ️ /stop: активной сессии нет");
+            return;
+        }
+        // опускаем флаг «работаем»
+        MemoryDb.getFlag(chatId).set(false);
+
+        // переводим в AUTO_PAUSE(MANUAL)
+        MemoryDb.withSession(chatId, ss -> ss.autoPause(DrainSession.AutoPauseReason.MANUAL, "Stopped by user"));
+
+        log.warn("⏹ MANUAL STOP: {}", snapshot(MemoryDb.getSession(chatId)));
+        telegram.reply(chatId, "⏸ Перелив поставлен на паузу (MANUAL).");
+    }
+
 
     /** Короткий статус активной сессии по chatId. Данные читаются атомарно через MemoryDb.withSession. */
     public String status(Long chatId) {
@@ -607,6 +727,7 @@ public class DrainService {
                                     String details,
                                     String whereTag) {
         // защищаемся от повторных вызовов
+        MemoryDb.getFlag(chatId).set(false);
         if (s.getState() != DrainSession.State.AUTO_PAUSE) {
             s.autoPause(reason, details);
         }
@@ -704,5 +825,14 @@ public class DrainService {
         symbol = symbol.toUpperCase();
         if (symbol.endsWith("USDT")) return symbol.substring(0, symbol.length() - 4);
         return symbol;
+    }
+
+    private boolean stopped(Long chatId, DrainSession s) {
+        return s.getState() == DrainSession.State.AUTO_PAUSE || !MemoryDb.getFlag(chatId).get();
+    }
+
+    private void closeSub(java.util.concurrent.atomic.AtomicReference<OrderEventBus.Subscription> ref) {
+        OrderEventBus.Subscription old = ref.getAndSet(null);
+        if (old != null) old.close();
     }
 }

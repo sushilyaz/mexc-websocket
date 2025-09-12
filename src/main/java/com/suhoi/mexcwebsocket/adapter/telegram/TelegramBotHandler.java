@@ -53,14 +53,13 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
                         /ticks <N> — количество тиков над/под спредом для агрессивной лимитки (сейчас: %d)
                         /set spread_guard <VAL> — расстояние от границ спреда, 0 < VAL < 0.5 (сейчас: %s)
 
-                        Режимы перелива:
-                        1) Простой:   /drain <SYMBOL> <USDT>
+                        Запуск перелива:   /drain <SYMBOL> <USDT>
                            пример: /drain ANTUSDT 5
 
                         Сервис:
                         /status — показать текущее состояние перелива
                         /stop — ручная пауза
-                        /continue <SYMBOL> [cycles] — продолжить из фактических балансов
+                        /continue <SYMBOL> — продолжить из фактических балансов
                         """.formatted(
                         Constants.TICK_ABOVE,
                         Constants.SPREAD_GUARD.stripTrailingZeros().toPlainString()
@@ -138,23 +137,24 @@ public class TelegramBotHandler extends TelegramLongPollingBot {
                 return;
             }
 
+            // ===== /stop =====
             if (text.startsWith("/stop")) {
-                tg.reply(chatId, "⏸ Поставил на паузу (MANUAL).");
+                drainService.manualStop(chatId);
                 return;
             }
 
             if (text.startsWith("/continue")) {
                 String[] p = text.split("\\s+");
                 if (p.length < 2) {
-                    tg.reply(chatId, "Формат: /continue <SYMBOL> [cycles]\nпример: /continue ANTUSDT 20");
+                    tg.reply(chatId, "Формат: /continue <SYMBOL>\n" +
+                            "Условие: автопауза активна, A владеет base, B — нет. Продолжу на весь свободный base у A.");
                     return;
                 }
                 String symbol = p[1].toUpperCase();
-                int cycles = (p.length >= 3) ? Integer.parseInt(p[2]) : 20;
-                tg.reply(chatId, "▶️ Продолжаю из фактических балансов по %s".formatted(symbol));
-                // drainService.continueFromBalances(symbol, chatId, cycles);
+                drainService.continueFromBalances(symbol, chatId);
                 return;
             }
+
 
             if (text.startsWith("/drain")) {
                 String[] p = text.split("\\s+");
