@@ -184,13 +184,15 @@ public class DrainService {
         BigDecimal effMinNotional = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
         BigDecimal minQtyForSell = MarketMath.minQtyForNotional(pSell, f.getStepSize(), effMinNotional);
 
-        if (s.getQtyA() == null || s.getQtyA().compareTo(minQtyForSell) < 0) {
+        // нормализуем план к шагу — и валидируем минимум повторно
+        BigDecimal qtySellA = MarketMath.normalizeQty(nvl(s.getQtyA()), f);
+        if (qtySellA.compareTo(minQtyForSell) < 0) {
             return autoPauseAndZero(chatId, s, DrainSession.AutoPauseReason.INSUFFICIENT_BALANCE,
-                    "qtyA < minNotional для SELL @ " + fmt(pSell) + " (qtyA=" + fmt(s.getQtyA()) + ", min=" + fmt(minQtyForSell) + ")",
+                    "qtyA < minNotional для SELL @ " + fmt(pSell) + " (qtyA=" + fmt(qtySellA) + ", min=" + fmt(minQtyForSell) + ")",
                     "PRE-A-SELL-MIN");
         }
 
-        log.info("[SELL_PLANNED] {} nearSell={} planQtyA={}", symbol, fmt(pSell), fmt(s.getQtyA()));
+        log.info("[SELL_PLANNED] {} nearSell={} planQtyA={}", symbol, fmt(pSell), fmt(qtySellA));
 
         String sellClientId = UUID.randomUUID().toString().replace("-", "");
         s.setSellOrderId(sellClientId);
@@ -209,7 +211,7 @@ public class DrainService {
                 // SELL[A] принят — проверяем AFTER_A_SELL_PLACED (с фазовой задержкой)
                 verifyLater(chatId, s, BalanceControllerWs.Phase.AFTER_A_SELL_PLACED);
 
-                BigDecimal qtyPlanned = MarketMath.normalizeQty(s.getQtyA(), f);
+                BigDecimal qtyPlanned = MarketMath.normalizeQty(qtySellA, f);
                 String buyBClientId = UUID.randomUUID().toString().replace("-", "");
 
                 myAsks.clear();
@@ -311,14 +313,14 @@ public class DrainService {
                     log.info("[BUY_UPPER_PLANNED] {} nearBuy={} (excl my SELL[A] @ {})",
                             symbol, fmt(pBuyUpper), fmt(s.getPSell()));
 
-                    BigDecimal qtyUpper = MarketMath.normalizeQty(nvl(s.getLastFilledLowerQty()), f);
+                    BigDecimal qtyUpperPlan = MarketMath.normalizeQty(nvl(s.getLastFilledLowerQty()), f);
 
                     BigDecimal effMinNotional2 = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
                     BigDecimal minQtyNeedUpper = MarketMath.minQtyForNotional(pBuyUpper, f.getStepSize(), effMinNotional2);
-                    if (qtyUpper.compareTo(minQtyNeedUpper) < 0 || qtyUpper.compareTo(f.getMinQty()) < 0) {
+                    if (qtyUpperPlan.compareTo(minQtyNeedUpper) < 0 || qtyUpperPlan.compareTo(f.getMinQty()) < 0) {
                         autoPauseAndNotify(chatId, s, DrainSession.AutoPauseReason.INSUFFICIENT_BALANCE,
                                 "qtyUpper < minNotional для BUY[A] @ " + fmt(pBuyUpper) +
-                                        " (qtyUpper=" + fmt(qtyUpper) + ", min=" + fmt(minQtyNeedUpper) + ")",
+                                        " (qtyUpper=" + fmt(qtyUpperPlan) + ", min=" + fmt(minQtyNeedUpper) + ")",
                                 "A-BUY-LOWER-MIN");
                         return;
                     }
@@ -333,68 +335,103 @@ public class DrainService {
 
                         if (evA instanceof OrderEvent.OrderAccepted acc) {
                             myBids.clear();
-                            myBids.put(s.getPBuy(), qtyUpper);
+                            myBids.put(s.getPBuy(), qtyUpperPlan);
                             verifyLater(chatId, s, BalanceControllerWs.Phase.AFTER_A_BUY_PLACED);
 
-                            String sellBBelowClientId = UUID.randomUUID().toString().replace("-", "");
-                            var subSellBRef = new AtomicReference<OrderEventBus.Subscription>();
-                            OrderEventBus.Subscription subSellB = orderEventBus.subscribe(evB2 -> {
-                                if (s.getRunId() != runIdLocal || stopped(chatId, s)) {
-                                    closeSub(subSellBRef);
-                                    return;
-                                }
-                                if (evB2 instanceof OrderEvent.OrderPartiallyFilled pp) {
-                                    log.info("📥 {} SELL[B] PARTIAL cid={} cumQty={} avg={} quote={}",
-                                            symbol, pp.clientId(),
-                                            pp.cumulativeQty().stripTrailingZeros(),
-                                            pp.avgPrice().stripTrailingZeros(),
-                                            pp.cumulativeQuote().stripTrailingZeros());
-                                } else if (evB2 instanceof OrderEvent.OrderFilled ff) {
-                                    log.info("✅ {} SELL[B] FILLED cid={} cumQty={} avg={} quote={} (taker fee incl.)",
-                                            symbol, ff.clientId(),
-                                            ff.cumulativeQty().stripTrailingZeros(),
-                                            ff.avgPrice().stripTrailingZeros(),
-                                            ff.cumulativeQuote().stripTrailingZeros());
-                                    closeSub(subSellBRef);
-                                } else if (evB2 instanceof OrderEvent.OrderCanceled cc) {
-                                    log.warn("❗ {} SELL[B] IOC canceled (cum={})", symbol, fmt(cc.cumulativeQty()));
-                                    closeSub(subSellBRef);
-                                } else if (evB2 instanceof OrderEvent.OrderRejected rr) {
-                                    autoPauseAndNotify(chatId, s, DrainSession.AutoPauseReason.UNKNOWN, "B SELL rejected: " + rr.reason(), "B-SELL-REJ");
-                                    closeSub(subSellBRef);
-                                }
-                            }, OrderEventBus.byClientId(sellBBelowClientId));
-                            subSellBRef.set(subSellB);
-
-                            drainScheduler.schedule(() -> {
-                                if (s.getRunId() != runIdLocal || stopped(chatId, s)) {
-                                    closeSub(subSellBRef);
-                                    return;
-                                }
-                                if (subSellBRef.get() != null && s.getState() != DrainSession.State.AUTO_PAUSE) {
-                                    autoPauseAndNotify(chatId, s, DrainSession.AutoPauseReason.TIMEOUT, "No WS status for B SELL", "B-SELL-WS");
-                                    closeSub(subSellBRef);
-                                }
-                            }, 3, TimeUnit.SECONDS);
-
+                            // ======= ГЕЙТ ПЕРЕД SELL[B] (защита от Oversold/30005) =======
+                            // Сколько БАЗЫ реально доступно на B сейчас
+                            final AtomicReference<BigDecimal> bFreeRef = new AtomicReference<>(BigDecimal.ZERO);
                             try {
-                                if (s.getRunId() != runIdLocal || stopped(chatId, s)) {
+                                MemoryDb.withSession(chatId, sess -> {
+                                    BigDecimal free = sess.getBBaseFree();
+                                    if (free != null) bFreeRef.set(free);
+                                });
+                            } catch (Exception ignore) {}
+                            BigDecimal bBaseAvail = MarketMath.floorToStep(bFreeRef.get(), f.getStepSize());
+                            if (bBaseAvail == null) bBaseAvail = BigDecimal.ZERO;
+
+                            // Продавать не больше плана (qtyUpperPlan) и не больше, чем реально есть
+                            BigDecimal qtySellB = bBaseAvail.min(qtyUpperPlan);
+                            qtySellB = MarketMath.normalizeQty(qtySellB, f);
+
+                            // Минимум под notional на цене верхней кромки
+                            BigDecimal effMinNotionalSellB = MarketMath.resolveMinNotional(symbol, f.getMinNotional());
+                            BigDecimal minQtyNeedSellB = MarketMath.minQtyForNotional(s.getPBuy(), f.getStepSize(), effMinNotionalSellB);
+
+                            if (qtySellB.compareTo(minQtyNeedSellB) < 0 || qtySellB.compareTo(f.getMinQty()) < 0) {
+                                log.info("[SELL[B] SKIP] no inventory: availBBase={} plan={} minNeed={} (price={})",
+                                        fmt(bBaseAvail), fmt(qtyUpperPlan), fmt(minQtyNeedSellB), fmt(s.getPBuy()));
+                                // безопасно пропускаем SELL[B], НЕ автопаузим
+                            } else {
+                                String sellBBelowClientId = UUID.randomUUID().toString().replace("-", "");
+                                var subSellBRef = new AtomicReference<OrderEventBus.Subscription>();
+                                OrderEventBus.Subscription subSellB = orderEventBus.subscribe(evB2 -> {
+                                    if (s.getRunId() != runIdLocal || stopped(chatId, s)) {
+                                        closeSub(subSellBRef);
+                                        return;
+                                    }
+                                    if (evB2 instanceof OrderEvent.OrderPartiallyFilled pp) {
+                                        log.info("📥 {} SELL[B] PARTIAL cid={} cumQty={} avg={} quote={}",
+                                                symbol, pp.clientId(),
+                                                pp.cumulativeQty().stripTrailingZeros(),
+                                                pp.avgPrice().stripTrailingZeros(),
+                                                pp.cumulativeQuote().stripTrailingZeros());
+                                    } else if (evB2 instanceof OrderEvent.OrderFilled ff) {
+                                        log.info("✅ {} SELL[B] FILLED cid={} cumQty={} avg={} quote={} (taker fee incl.)",
+                                                symbol, ff.clientId(),
+                                                ff.cumulativeQty().stripTrailingZeros(),
+                                                ff.avgPrice().stripTrailingZeros(),
+                                                ff.cumulativeQuote().stripTrailingZeros());
+                                        closeSub(subSellBRef);
+                                    } else if (evB2 instanceof OrderEvent.OrderCanceled cc) {
+                                        log.warn("❗ {} SELL[B] IOC canceled (cum={})", symbol, fmt(cc.cumulativeQty()));
+                                        closeSub(subSellBRef);
+                                    } else if (evB2 instanceof OrderEvent.OrderRejected rr) {
+                                        // Вряд ли придёт REJECT по WS, но если да — НЕ автопаузим из-за инвентаря
+                                        log.warn("❗ {} SELL[B] rejected: {}", symbol, rr.reason());
+                                        closeSub(subSellBRef);
+                                    }
+                                }, OrderEventBus.byClientId(sellBBelowClientId));
+                                subSellBRef.set(subSellB);
+
+                                drainScheduler.schedule(() -> {
+                                    if (s.getRunId() != runIdLocal || stopped(chatId, s)) {
+                                        closeSub(subSellBRef);
+                                        return;
+                                    }
+                                    if (subSellBRef.get() != null && s.getState() != DrainSession.State.AUTO_PAUSE) {
+                                        log.warn("⏱ No WS status for B SELL within timeout");
+                                        closeSub(subSellBRef);
+                                    }
+                                }, 3, TimeUnit.SECONDS);
+
+                                try {
+                                    if (s.getRunId() != runIdLocal || stopped(chatId, s)) {
+                                        closeSub(subSellBRef);
+                                        return;
+                                    }
+                                    String oidSellB = mexcRestFacade.limitSellBelowSpreadB(symbol, s.getPBuy(), qtySellB, chatId, sellBBelowClientId);
+                                    if (oidSellB == null) {
+                                        log.warn("❗ {} SELL[B] REST failed/null orderId (qty={})", symbol, fmt(qtySellB));
+                                        closeSub(subSellBRef);
+                                    } else {
+                                        log.info("➡️ {} SELL[B] placed: cidB={} orderIdB={} qty={}",
+                                                symbol, sellBBelowClientId, oidSellB, fmt(qtySellB));
+                                    }
+                                } catch (Exception ex) {
+                                    String msg = ex.getMessage() == null ? "" : ex.getMessage();
+                                    if (msg.contains("Oversold") || msg.contains("30005")) {
+                                        // мягкая обработка — НЕ автопауза
+                                        log.warn("❗ {} SELL[B] dropped: Oversold (no inventory). qty={} px={} msg={}",
+                                                symbol, fmt(qtySellB), fmt(s.getPBuy()), msg);
+                                    } else {
+                                        log.error("SELL[B] send failed: {}", msg, ex);
+                                        autoPauseAndNotify(chatId, s, DrainSession.AutoPauseReason.UNKNOWN, "B MARKET-LIKE SELL send failed", "B-SELL-EX");
+                                    }
                                     closeSub(subSellBRef);
-                                    return;
                                 }
-                                String oidSellB = mexcRestFacade.limitSellBelowSpreadB(symbol, s.getPBuy(), qtyUpper, chatId, sellBBelowClientId);
-                                if (oidSellB == null) {
-                                    autoPauseAndNotify(chatId, s, DrainSession.AutoPauseReason.UNKNOWN, "B SELL REST failed/null orderId", "B-SELL-REST");
-                                    closeSub(subSellBRef);
-                                } else {
-                                    log.info("➡️ {} SELL[B] placed: cidB={} orderIdB={} qty={}",
-                                            symbol, sellBBelowClientId, oidSellB, fmt(qtyUpper));
-                                }
-                            } catch (Exception ex) {
-                                log.error("SELL[B] send failed: {}", ex.getMessage(), ex);
-                                autoPauseAndNotify(chatId, s, DrainSession.AutoPauseReason.UNKNOWN, "B MARKET-LIKE SELL send failed", "B-SELL-EX");
-                                closeSub(subSellBRef);
                             }
+                            // ======= /ГЕЙТ ПЕРЕД SELL[B] =======
 
                         } else if (evA instanceof OrderEvent.OrderFilled fA) {
                             log.info("✅ {} BUY[A] FILLED cid={} cumQty={} avg={} quote={}",
@@ -443,7 +480,7 @@ public class DrainService {
                         closeSub(subAUpperRef);
                         return;
                     }
-                    mexcRestFacade.placeLimitBuyAAt(symbol, pBuyUpper, qtyUpper, chatId, buyAUpperClientId);
+                    mexcRestFacade.placeLimitBuyAAt(symbol, pBuyUpper, qtyUpperPlan, chatId, buyAUpperClientId);
 
                 } catch (Exception ex) {
                     log.warn("[BUY_UPPER_PLANNED/X] {} failed: {}", symbol, ex.toString());
@@ -476,7 +513,8 @@ public class DrainService {
             closeSub(subRef);
             return BigDecimal.ZERO;
         }
-        mexcRestFacade.placeLimitSellA(s.getSymbol(), pSell, s.getQtyA(), chatId, sellClientId);
+        // Продаём только нормализованное допустимое количество
+        mexcRestFacade.placeLimitSellA(s.getSymbol(), pSell, qtySellA, chatId, sellClientId);
         return null;
     }
 
@@ -681,6 +719,10 @@ public class DrainService {
         return x == null ? BigDecimal.ZERO : x;
     }
 
+    private static String nzStr(String s) {
+        return s == null ? "" : s;
+    }
+
     private static String nzStr(String s, String def) {
         return s == null ? def : s;
     }
@@ -724,22 +766,46 @@ public class DrainService {
             BalanceControllerWs.Phase.AFTER_UPPER_FILLED, 250L
     );
 
-    /**
-     * Любой фейл verify — сразу полноценная автопауза с опусканием флага и уведомлением.
-     */
+    // ДОБАВЬ в класс DrainService (рядом с другими private-хелперами)
+    private boolean isPhaseStillRelevant(DrainSession s, BalanceControllerWs.Phase ph) {
+        // Фаза актуальна, только если соответствующая нога ещё не FILLED
+        return switch (ph) {
+            case AFTER_A_SELL_PLACED -> s.getLastFilledLowerQty() == null || s.getLastFilledLowerQty().signum() == 0;
+            case AFTER_A_BUY_PLACED  -> s.getLastFilledUpperQty() == null || s.getLastFilledUpperQty().signum() == 0;
+            default -> true; // остальные фазы проверяем как раньше
+        };
+    }
+
+    // ЗАМЕНИ существующий verifyLater(...) на этот
     private void verifyLater(Long chatId, DrainSession s, BalanceControllerWs.Phase ph) {
         var f = mexcRestFacade.getSymbolFilters(s.getSymbol());
         long delay = PHASE_DELAY_MS.getOrDefault(ph, 400L);
+        final long runIdLocal = s.getRunId();
+
         drainScheduler.schedule(() -> {
-            boolean ok = balanceControllerWs.verify(s, ph, f);
+            // Берём свежую сессию (а не "s", который мог измениться)
+            DrainSession fresh = MemoryDb.getSession(chatId);
+            if (fresh == null) return;
+
+            // Не наш "забег" — пропускаем
+            if (fresh.getRunId() != runIdLocal) return;
+
+            // Уже стоп/пауза — не шумим
+            if (fresh.getState() == DrainSession.State.AUTO_PAUSE || !MemoryDb.getFlag(chatId).get()) return;
+
+            // Фаза уже «перепрыгнута» (ордер успел FILLED) — пропускаем, чтобы не ловить ложный mismatch
+            if (!isPhaseStillRelevant(fresh, ph)) return;
+
+            boolean ok = balanceControllerWs.verify(fresh, ph, f);
             if (!ok) {
-                autoPauseAndNotify(chatId, s,
-                        s.getReason() != null ? s.getReason() : DrainSession.AutoPauseReason.BALANCE_MISMATCH,
-                        s.getReasonDetails(),
+                autoPauseAndNotify(chatId, fresh,
+                        fresh.getReason() != null ? fresh.getReason() : DrainSession.AutoPauseReason.BALANCE_MISMATCH,
+                        fresh.getReasonDetails(),
                         "VERIFY-" + ph);
             }
         }, delay, TimeUnit.MILLISECONDS);
     }
+
 
     /**
      * Централизованная автопауза + Telegram.
