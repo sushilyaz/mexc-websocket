@@ -706,14 +706,16 @@ public class DrainService {
         executeCycle(chatId, s);
     }
 
+    // было 250 мс
     private void verifyLaterAndMaybeContinue(Long chatId, DrainSession s, SymbolFilters f, Map<BigDecimal, BigDecimal> myBids) {
         verifyLater(chatId, s, BalanceControllerWs.Phase.AFTER_UPPER_FILLED);
         drainScheduler.schedule(() -> {
             if (!stopped(chatId, s) && s.getState() != DrainSession.State.AUTO_PAUSE) {
                 continueOrFinish(chatId, s, f, myBids);
             }
-        }, 250, TimeUnit.MILLISECONDS);
+        }, 350, TimeUnit.MILLISECONDS); // было 250 -> 350
     }
+
 
     private static BigDecimal nvl(BigDecimal x) {
         return x == null ? BigDecimal.ZERO : x;
@@ -802,8 +804,21 @@ public class DrainService {
                         fresh.getReason() != null ? fresh.getReason() : DrainSession.AutoPauseReason.BALANCE_MISMATCH,
                         fresh.getReasonDetails(),
                         "VERIFY-" + ph);
+            } else {
+                if (ph == BalanceControllerWs.Phase.AFTER_UPPER_FILLED) {
+                    accrueProgressFromLastCycle(fresh);
+                }
             }
         }, delay, TimeUnit.MILLISECONDS);
+    }
+
+    // 1) Хелпер для накопления прогресса
+    private void accrueProgressFromLastCycle(DrainSession s) {
+        // сколько USDT утекло с A в последнем цикле
+        BigDecimal moved = nvl(s.getLastSpentAUpper()).subtract(nvl(s.getLastCummA()));
+        if (moved.signum() > 0) {
+            s.setDrainedUSDT(nvl(s.getDrainedUSDT()).add(moved));
+        }
     }
 
 
