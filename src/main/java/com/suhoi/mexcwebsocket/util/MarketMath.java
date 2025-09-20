@@ -50,15 +50,23 @@ public final class MarketMath {
     }
 
     // -- Минимально допустимое qty при заданной цене под minNotional (кратно stepSize)
+    // MarketMath.java
     public static BigDecimal minQtyForNotional(BigDecimal price, BigDecimal stepSize, BigDecimal minNotional) {
         if (price == null || price.signum() <= 0) return BigDecimal.ZERO;
         if (minNotional == null || minNotional.signum() <= 0) return BigDecimal.ZERO;
         if (stepSize == null || stepSize.signum() <= 0) stepSize = BigDecimal.ONE;
 
-        BigDecimal units = minNotional.divide(price, 0, RoundingMode.UP);
-        BigDecimal k = units.divide(stepSize, 0, RoundingMode.UP);
-        return k.multiply(stepSize).stripTrailingZeros();
+        // Сколько «сырых» штук нужно на minNotional по текущей цене (с запасом вверх).
+        // Дальше поднимем к сетке шага количества.
+        BigDecimal rawQty = minNotional.divide(price, 18, RoundingMode.UP);
+
+        // ceil к сетке stepSize: ближайшее кратное stepSize НЕ НИЖЕ rawQty
+        BigDecimal steps = rawQty.divide(stepSize, 0, RoundingMode.UP);
+        BigDecimal q = steps.multiply(stepSize);
+
+        return q.stripTrailingZeros();
     }
+
 
     /**
      * Корректирует и валидирует количество (до кратности stepSize).

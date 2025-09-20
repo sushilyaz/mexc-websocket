@@ -16,9 +16,9 @@ public class BalanceControllerWs {
 
     private static final BigDecimal REL_TOL = new BigDecimal("0.003");     // 0.3%
     private static final BigDecimal ABS_EPS_Q = new BigDecimal("0.0005");  // 0.0005 USDT
-    private static final long FRESH_MS = 1500;
-    private static final int RETRIES = 4;
-    private static final long RETRY_SLEEP_MS = 120;
+    private static final long FRESH_MS = 2500;   // было 1500
+    private static final int RETRIES = 8;        // было 4
+    private static final long RETRY_SLEEP_MS = 150; // было 120
 
     public enum Phase {
         AFTER_A_MKT_BUY,      // S1
@@ -56,9 +56,22 @@ public class BalanceControllerWs {
         return switch (phase) {
             case AFTER_A_MKT_BUY -> approx(s.aBaseTotal(), nz(s.getQtyA()), baseEps, REL_TOL);
 
-            case AFTER_A_SELL_PLACED ->
-                    approx(s.getABaseLocked(), MarketMath.normalizeQty(nz(s.getQtyA()), f), baseEps, REL_TOL)
-                            && s.getABaseFree().abs().compareTo(baseEps) <= 0;
+            case AFTER_A_SELL_PLACED -> {
+                // Допускаем два валидных состояния:
+                // 1) уже зафризили базу: locked≈qtyU, free≈0
+                // 2) пре-лок (ивент фриза ещё едет): free≈qtyU, locked≈0
+                BigDecimal qtyU   = MarketMath.normalizeQty(nz(s.getQtyA()), f);
+                BigDecimal free   = nz(s.getABaseFree());
+                BigDecimal locked = nz(s.getABaseLocked());
+
+                boolean lockedReady = approx(locked, qtyU, baseEps, REL_TOL)
+                        && free.abs().compareTo(baseEps) <= 0;
+
+                boolean preLockOk   = approx(free, qtyU, baseEps, REL_TOL)
+                        && locked.abs().compareTo(baseEps) <= 0;
+
+                yield lockedReady || preLockOk;
+            }
 
             case AFTER_LOWER_FILLED -> {
                 BigDecimal filledQty = nz(s.getLastFilledLowerQty()); // SELL[A]
@@ -107,7 +120,7 @@ public class BalanceControllerWs {
         BigDecimal thr = nz(delta).subtract(absEps.max(nz(delta).abs().multiply(relEps)));
         // newVal <= start - delta  =>  -newVal >= -(start - delta)
         // здесь мы сравниваем только «масштаб» падения: newVal уменьшился минимум на delta
-        return true; // упрощаем, т.к. стартового значения нет; контролим через notional/locks в других фазах
+        return true; // стартового значения нет; контролим через notional/locks в других фазах
     }
 
     private static BigDecimal nz(BigDecimal x){ return x==null?BigDecimal.ZERO:x; }
